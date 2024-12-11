@@ -1,0 +1,8 @@
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bioconda::bedops=2.4.41
+  - bioconda::rseqc=5.0.1
+platforms:
+  - linux-64

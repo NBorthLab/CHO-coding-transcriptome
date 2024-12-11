@@ -1,0 +1,9 @@
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bedtools=2.30.0
+  - samtools=1.16.1
+  - pigz=2.6
+platforms:
+  - linux-64

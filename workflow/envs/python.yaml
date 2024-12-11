@@ -1,0 +1,11 @@
+name: P02-python
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - pygtftk
+  - ipython
+  - pyyaml
+platforms:
+  - linux-64

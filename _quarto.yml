@@ -1,0 +1,18 @@
+project:
+  title: "fat_CHO_transcriptome"
+  render:
+    - "analysis/*.qmd"
+    - "analysis/indeterminate-genes.R"
+  execute-dir: "project"
+  output-dir: results
+
+toc: true
+number-sections: true
+
+format:
+  html:
+    embed-resources: true
+
+knitr:
+  opts_chunk:
+    collapse: true

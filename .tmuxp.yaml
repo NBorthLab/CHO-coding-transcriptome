@@ -1,0 +1,15 @@
+session_name: P02-1
+windows:
+  - window_name: nvim
+    panes:
+      - shell_command_before: "condactivate P02-r"
+  - window_name: snakemake
+    panes:
+      - shell_command_before: "condactivate P02-snakemake"
+  - window_name: shell
+    panes:
+      - shell_command_before: "condactivate"
+  - window_name: htop
+    panes:
+      - shell_command: "htop"
+

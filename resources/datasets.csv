@@ -1,0 +1,17 @@
+Project_Accession,Source,Cell_Line,Publication_Author,Publication_Year,DOI,Q_mM,Producer,Theme,Library_Strategy,Run_Accession_Pattern
+SRP246348,SRA,CHO-S,Kol,2020,https://doi.org/10.1038/s41467-020-15866-w,8,Rituximab,KO of HCP,PolyA,SRR1099*
+SRP066848,SRA,CHO-K1,van Wijk,2017,https://doi.org/10.1128/mBio.02128-16,1,NA,Viral infection,PolyA,SRR2968*
+SRP111368,SRA,CHO-K1,Orellana,2018,https://doi.org/10.1002/biot.201700231,NA,mAb,High vs Low Producers,PolyA,SRR5812*
+SRP159459,SRA,CHO-K1,Chiang,2019,https://doi.org/10.1038%2Fs41598-019-45126-x,8,NA,Viral infection,PolyA,SRR777*
+SRP069883,SRA,CHO-S,Hefzi,2016,https://doi.org/10.1016/j.cels.2016.10.020,8,NA,GEM construction,PolyA,SRR3161*
+SRP234382,SRA,CHO-K1,Tzani,2020,https://doi.org/10.1002/bit.27365,8,mAb,Temperature shift,rRNA,SRR1057*
+SRP324587,SRA,CHO-K1,Barzadd,2022,https://doi.org/10.1016/j.nbt.2022.01.010,6,bsAb,Bispecific Antibody aggregation,PolyA,SRR1486*
+ERP122753,SRA,CHO-K1,Dhiman,2020,https://doi.org/10.1016/j.csbj.2020.11.008,4,mAb,Discovery of stable landing pads,rRNA,ERR*
+INH010000,In-house,,Papež,2020,,,,,,
+INH020000,In-house,CHO-DXB11,Novak,,,,Anti-AbTCR mAb,AntiAbTCR,rRNA,
+INH030000,In-house,,Weinguny,,,,,Subclones,,
+INH040000,In-house,,Weinguny,,,,,Subclonality,,
+INH050000,In-house,,Novak,,,,Anti-LAMP1 mAb/anti-AbTCR mAb,? (2019 clones),,
+INH060000,In-house,,Ruckerbauer,,,,,?,,
+INH070000,In-house,CHO-K1,Novak,,,,NA,Temperature shift,PolyA,
+INH080000,In-house,,,,,,,eCHO data,,

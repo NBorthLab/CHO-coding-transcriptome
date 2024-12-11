@@ -1,0 +1,8 @@
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - trimmomatic=0.39
+  - pigz=2.6
+platforms:
+  - linux-64

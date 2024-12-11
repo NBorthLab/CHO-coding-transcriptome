@@ -1,0 +1,1119 @@
+---
+title: Chromatin States enrichments
+date: "`r Sys.Date()`"
+---
+
+
+# Description
+
+Assess enrichment of chromatin states in genes that were found to be expressed
+or not expressed in CHO-K1. It is expected that the expression state of genes is
+reflected in the histone marks and predicted chromatin states.
+
+
+# Libraries and data loading
+
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(ggpubr)
+  library(glue)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(RColorBrewer)
+  library(grid)
+})
+```
+
+
+```{r params}
+prefix <- "06_chromatin-states"
+```
+
+
+## Emissions
+
+The emissions paremters are from the Hidden Markov Model of ChromHMM.
+
+```{r load-emissions}
+emissions <- read_tsv(
+  here("resources/raw_data/chromatin-states/emissions_11_all.txt")
+) %>%
+  {
+    colnames(.)[1] <- "state"
+    .
+  }
+
+emissions_matrix <- emissions %>%
+  column_to_rownames("state") %>%
+  as.matrix()
+
+n_histone_marks <- ncol(emissions_matrix)
+n_chromatin_states <- nrow(emissions_matrix)
+```
+
+
+## Overlap enrichment data
+
+Overlap enrichment is done for all _regions_ in a annotation, like gene body,
+exons, the 2kb window around the TSS (as opposed to single points in the
+annotation).
+
+
+```{r load-data-vars}
+expression_types <- c(
+  "expressed-genes", "ignored-genes", "not-expressed-genes", "reactive-genes",
+  "non-reactive-genes"
+)
+overlap_types <- c("genes", "exons", "tss2kb")
+neighbor_types <- c("tss", "tes")
+timepoints <- c("Tp5", "Tp6", "Tp7", "Tp8", "Tp9", "Tp10", "Tp11", "Tp12")
+
+n_timepoints <- length(timepoints)
+```
+
+
+```{r load-data}
+# Make all combinations of variables and concatenate them to a parseable
+# character vector.
+overlap_filepatterns <- expand_grid(
+  expression_types, timepoints
+) %>%
+  apply(1, paste, collapse = "_") %>%
+  print()
+
+overlap_rawdata <- map_dfr(overlap_filepatterns, function(x) {
+  # Split variables up again:
+  # 1 - gene expression state; 2 - Feature (gene, exons, ...); 3 - time point;
+  comb <- str_split(x, "_")[[1]]
+
+  filepath <- glue(
+    "results/chromatin-states/\\
+    overlap-enrichment/{comb[1]}_{comb[2]}.txt"
+  )
+
+  suppressMessages({
+    read_tsv(
+      here(filepath)
+    ) %>%
+      {
+        old <- colnames(.)[3:length(.)]
+        new_colnames <- c(
+          c("state", "genome_cov"),
+          str_replace(old, ".*_(\\w+)\\.bed", "\\1")
+        )
+        colnames(.) <- new_colnames
+        .
+      } %>%
+      mutate(expression = comb[1], timepoint = comb[2])
+  })
+})
+```
+
+The Overlap Enrichment results additionally contain a "Base" state, which I
+guess is something like the "baseline" enrichment of the genomic features
+compared to the entire genome or somthing. I have no idea....
+
+Just gonna save this in case figure out what this is and I would need it
+later.
+
+```{r base-state}
+overlap_base <- overlap_rawdata %>%
+  filter(state == "Base")
+```
+
+```{r overlap-data}
+overlap_data <- overlap_rawdata %>%
+  filter(state != "Base") %>%
+  pivot_longer(
+    cols = c(genome_cov, genes, exons, tss2kb),
+    names_to = "type",
+    values_to = "enrichment"
+  ) %>%
+  mutate(
+    state = factor(state,
+      levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+    ),
+    expression = factor(expression,
+      levels = expression_types,
+      labels = expression_types
+    ),
+    type = factor(type,
+      levels = c("genome_cov", overlap_types)
+    ),
+    timepoint = factor(timepoint,
+      levels = timepoints
+    )
+  )
+
+```
+
+```{r show-overlap-enrichment-data}
+head(overlap_data)
+
+str(overlap_data)
+```
+
+
+
+## Neighborhood enrichment data
+
+
+```{r load-neighborhood-data}
+# Make all combinations of variables and concatenate them to a parseable
+# character vector.
+neighbor_combinations <- expand_grid(
+  expression_types, neighbor_types, timepoints
+) %>%
+  apply(1, paste, collapse = "_") %>%
+  print()
+
+
+neighbor_rawdata <- map_dfr(neighbor_combinations, function(x) {
+  # Split variables up again:
+  # 1 - gene expression state; 2 - Feature (gene, exons, ...); 3 - time point;
+  comb <- str_split(x, "_")[[1]]
+
+  filepath <- glue(
+    "results/chromatin-states/\\
+    neighborhood-enrichment/{comb[1]}_{comb[2]}_{comb[3]}.txt"
+  )
+
+  suppressMessages({
+    read_tsv(here(filepath)) %>%
+      {
+        colnames(.)[1] <- "state"
+        .
+      } %>%
+      pivot_longer(
+        cols = -state,
+        names_to = "anchors",
+        values_to = "enrichment"
+      ) %>%
+      mutate(expression = comb[1], type = comb[2], timepoint = comb[3])
+  })
+})
+
+
+neighbor_data <- neighbor_rawdata %>%
+  mutate(
+    state = factor(state,
+      levels = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11")
+    ),
+    expression = factor(expression,
+      levels = expression_types,
+      labels = expression_types
+    ),
+    type = factor(type, levels = neighbor_types),
+    timepoint = factor(timepoint,
+      levels = timepoints
+    )
+  )
+```
+
+```{r view-neighborhood-enrichment-data}
+head(neighbor_data)
+
+str(neighbor_data)
+```
+
+
+# Calculations
+
+
+## Overlap enrichments
+
+First, calculate the mean and standard deviation of the enrichments acorss all
+timepoints.
+
+```{r calculate-enrichments}
+overlap_mean <- overlap_data %>%
+  group_by(state, expression, type) %>%
+  summarise(mean_enrich = mean(enrichment), sd_enrich = sd(enrichment)) %>%
+  ungroup()
+print(overlap_mean)
+
+genome_coverage <- overlap_data %>%
+  filter(type == "genome_cov") %>%
+  select(state, timepoint, enrichment) %>%
+  # Make unique because the three expression states have the same coverage in
+  # each timepoint; we only need one
+  unique()
+
+overlap_data %>%
+  filter(type == "genome_cov" & state == "2")
+```
+
+Next, we get the mean overlaps as matrix for plotting as heatmaps.
+
+```{r make-matrix}
+overlap_matrix <- overlap_mean %>%
+  {
+    # Separate out the genome coverage
+    # It will not be scaled along with the enrichments but plotted as is.
+    # Coverage is saved to one column matrix for plotting later.
+    .
+  } %>%
+  filter(type != "genome_cov") %>%
+  mutate(
+    expr_type = paste(expression, type, sep = "_"),
+    expr_type = factor(expr_type)
+  ) %>%
+  select(state, expr_type, mean_enrich) %>%
+  pivot_wider(names_from = "expr_type", values_from = "mean_enrich") %>%
+  column_to_rownames("state") %>%
+  as.matrix()
+
+overlap_matrix
+```
+
+Enrichments $E$ are scaled to $[0, 1]$:
+$$
+\frac{%
+  E - min(E)%
+}{%
+  \max(E) - \min(E)%
+}
+$$
+
+```{r scale-enrichments}
+scale_enrichments <- function(enrich) {
+  (enrich - min(enrich)) / (max(enrich) - min(enrich))
+}
+
+overlap_matrix_scaled <- apply(overlap_matrix, 2, scale_enrichments)
+```
+
+
+
+### Neighborhood enrichments
+
+```{r calculate-neighborhood-averages}
+neighbor_mean <- neighbor_data %>%
+  group_by(state, expression, type, anchors) %>%
+  summarise(mean_enrich = mean(enrichment), sd_enrich = sd(enrichment)) %>%
+  ungroup() %>%
+  select(state, expression, type, anchors, mean_enrich, sd_enrich)
+
+get_neighborhood_matrix <- function(expression, type) {
+  mtx <- neighbor_mean %>%
+    filter(expression == {{ expression }} & type == {{ type }}) %>%
+    select(state, anchors, mean_enrich) %>%
+    pivot_wider(names_from = "anchors", values_from = "mean_enrich") %>%
+    column_to_rownames("state") %>%
+    as.matrix() %>%
+    `[`(, order(as.numeric(colnames(.))))
+  (mtx - min(mtx)) / (max(mtx) - min(mtx))
+}
+```
+
+
+# Utility functions
+
+```{r heatmap-function}
+colour_palette <- rev(brewer.pal(5, "RdBu"))[c(1, 3, 5)]
+
+colour_mapping <- colorRamp2(
+  c(0, 1), c("white", "blue")
+)
+
+# FIXME: Where are these from? Name the source!
+
+
+state_names <- c(
+  "1" = "Polycomb repressed regions",
+  "2" = "Quiescent/low",
+  "3" = "Repressed heterochromatin",
+  "4" = "Strong transcription",
+  "5" = "Weak genic enhancer",
+  "6" = "Weak enhancer",
+  "7" = "Active Enhancer 1",
+  "8" = "Active Enhancer 2",
+  "9" = "Active Promoter",
+  "10" = "Flanking TSS Upstream",
+  "11" = "Flanking TSS Downstream"
+)
+state_abbrevs <- c("PcRepr", "Quie", "ReprHet", "Tx", "WkGEnh", "WkEnh",
+  "AEnh1", "AEnh2", "APr", "TSSUp", "TSSDn")
+
+state_list <- as.list(
+  paste0(state_names, " (", state_abbrevs, ")")
+)
+
+intervals <- colnames(get_neighborhood_matrix("expressed-genes", "tss"))
+
+cell_size <- 0.45
+gap_size <- unit(0.3, "mm")
+base_fontsize <- 8
+
+heatmap_defaults <- list(
+  cluster_columns = FALSE,
+  cluster_rows = FALSE,
+  column_names_gp = gpar(fontsize = base_fontsize),
+  row_names_gp = gpar(fontsize = base_fontsize - 1),
+  row_labels = state_list,
+  col = colour_mapping,
+  rect_gp = gpar(col = "white", lwd = 1.5),
+  border_gp = gpar(col = "black", lwd = 1),
+  show_row_names = FALSE,
+  show_heatmap_legend = FALSE
+)
+```
+
+
+
+# Plot results
+
+
+## Overlap enrichment
+
+
+Heatmap of enrichments
+
+```{r plot-overlap-enrichment}
+overlap_enrich_heatmap_expr <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = overlap_matrix_scaled[, 1:3],
+      name = "expr",
+      column_labels = c("Gene body", "Exons", "TSS +/- 2kb"),
+      show_row_names = FALSE,
+      height = unit(cell_size * 11, "cm"),
+      width = unit(cell_size * 3, "cm"),
+      top_annotation = columnAnnotation(
+        te_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        be_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      right_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      ),
+      left_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+overlap_enrich_heatmap_igno <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = overlap_matrix_scaled[, 4:6],
+      name = "igno",
+      column_labels = c("Gene body", "Exons", "TSS +/- 2kb"),
+      show_row_names = FALSE,
+      height = unit(cell_size * 11, "cm"),
+      width = unit(cell_size * 3, "cm"),
+      top_annotation = columnAnnotation(
+        te_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        be_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      right_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      ),
+      left_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+overlap_enrich_heatmap_noexpr <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = overlap_matrix_scaled[, 7:9],
+      name = "noexpr",
+      column_labels = c("Gene body", "Exons", "TSS +/- 2kb"),
+      show_row_names = FALSE,
+      height = unit(cell_size * 11, "cm"),
+      width = unit(cell_size * 3, "cm"),
+      top_annotation = columnAnnotation(
+        tn_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        bn_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      right_annotation = rowAnnotation(
+        rn_gap = anno_empty(border = FALSE, width = gap_size)
+      ),
+      left_annotation = rowAnnotation(
+        rn_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+overlap_enrich_heatmap_reactive <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = overlap_matrix_scaled[, 10:12],
+      name = "react",
+      column_labels = c("Gene body", "Exons", "TSS +/- 2kb"),
+      show_row_names = FALSE,
+      height = unit(cell_size * 11, "cm"),
+      width = unit(cell_size * 3, "cm"),
+      top_annotation = columnAnnotation(
+        te_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        be_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      right_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      ),
+      left_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+# HACK: This is a horrible hack! Make this better, please!
+overlap_enrich_heatmap_reactive2 <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = overlap_matrix_scaled[, 10:12],
+      name = "react",
+      column_labels = c("Gene body", "Exons", "TSS +/- 2kb"),
+      show_column_names = FALSE,
+      show_row_names = FALSE,
+      height = unit(cell_size * 11, "cm"),
+      width = unit(cell_size * 3, "cm"),
+      top_annotation = columnAnnotation(
+        te_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        be_gap = anno_empty(border = FALSE, height = gap_size),
+        labs = anno_text(c("Gene body", "Exons", "TSS +/- 2kb"),
+          gp = gpar(fontsize = base_fontsize)
+        )
+      ),
+      right_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      ),
+      left_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+overlap_enrich_heatmap_nonreactive <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = overlap_matrix_scaled[, 13:15],
+      name = "nonreact",
+      column_labels = c("Gene body", "Exons", "TSS +/- 2kb"),
+      show_column_names = FALSE,
+      row_labels = state_abbrevs,
+      show_row_names = TRUE,
+      row_names_side = "left",
+      height = unit(cell_size * 11, "cm"),
+      width = unit(cell_size * 3, "cm"),
+      top_annotation = columnAnnotation(
+        te_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        be_gap = anno_empty(border = FALSE, height = gap_size),
+        labs = anno_text(c("Gene body", "Exons", "TSS +/- 2kb"),
+          gp = gpar(fontsize = base_fontsize)
+        )
+      ),
+      right_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      ),
+      left_annotation = rowAnnotation(
+        re_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+```
+
+Heatmap for emission parameters.
+
+```{r heatmap-emissions}
+overlap_emissions_heatmap <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults,
+    list(
+      matrix = emissions_matrix,
+      name = "emissions",
+      cluster_columns = FALSE,
+      show_row_names = TRUE,
+      row_names_side = "left",
+      # row_names_gp = gpar(fontsize = base_fontsize),
+      # column_names_gp = gpar(fontsize = base_fontsize),
+      width = unit(cell_size * 6, "cm"),
+      height = unit(cell_size * 11, "cm"),
+      top_annotation = columnAnnotation(
+        t_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      bottom_annotation = columnAnnotation(
+        b_gap = anno_empty(border = FALSE, height = gap_size)
+      ),
+      right_annotation = rowAnnotation(
+        r_gap = anno_empty(border = FALSE, width = gap_size + unit(0, "mm")),
+        genome_cov = anno_numeric(
+          genome_coverage %>%
+            group_by(state) %>%
+            summarise(mean = mean(enrichment)) %>%
+            `$`("mean"),
+          labels_format = function(x) paste0(sprintf("%.2f", x), "%"),
+          labels_gp = gpar(fontsize = base_fontsize),
+          align_to = "left"
+        ),
+        show_annotation_name = c(genome_cov = FALSE),
+        annotation_name_gp = gpar(fontsize = base_fontsize)
+      ),
+      left_annotation = rowAnnotation(
+        r_gap = anno_empty(border = FALSE, width = gap_size)
+      )
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+```
+
+Combine all three heatmaps into one.
+
+```{r combine-heatmaps-overlap}
+#| fig-width: 9
+#| fig-height: 5
+
+overlap_hmap <- grid.grabExpr({
+  legend <- Legend(
+    title = "Enrichment",
+    col_fun = colorRamp2(c(0, 1), c("white", "blue")),
+    border = "black",
+    labels_gp = gpar(fontsize = base_fontsize),
+    title_gp = gpar(fontsize = base_fontsize, fontface = "bold")
+  )
+
+  draw(
+    (overlap_emissions_heatmap +
+      overlap_enrich_heatmap_expr +
+      overlap_enrich_heatmap_noexpr +
+      # overlap_enrich_heatmap_igno +
+      overlap_enrich_heatmap_reactive),
+    ht_gap = unit(c(3, 0, 0, 0), "mm"),
+    adjust_annotation_extension = FALSE,
+    # merge_legends = TRUE,
+    # show_heatmap_legend = FALSE,
+    heatmap_legend_list = legend,
+    padding = unit(c(0, 0, 0, 0), "mm")
+  )
+
+  decorate_annotation("genome_cov", {
+    grid.rect(
+      x = unit(0, "npc"),
+      y = unit(0.5, "npc"),
+      width = unit(1.1, "npc"),
+      height = unit(1, "npc"),
+      just = "left",
+      gp = gpar(lwd = 1)
+    )
+    grid.text("Genome %", rot = 90, y = unit(-0.04, "npc"), hjust = 1,
+      gp = gpar(fontsize = base_fontsize)
+    )
+  })
+  decorate_heatmap_body("expr", {
+    grid.text("Expressed", y = unit(1.05, "npc"), vjust = 0,
+      gp = gpar(fontsize = base_fontsize, fontface = "bold"))
+  })
+  # decorate_heatmap_body("igno", {
+  #   grid.text("Indeter-\nminate", y = unit(1.05, "npc"), vjust = 0,
+  #     gp = gpar(fontsize = base_fontsize, fontface = "bold")
+  #   )
+  # })
+  decorate_heatmap_body("react", {
+    grid.text("Reactive", y = unit(1.05, "npc"), vjust = 0,
+      gp = gpar(fontsize = base_fontsize, fontface = "bold")
+    )
+  })
+  decorate_heatmap_body("noexpr", {
+    grid.text("Non-\nExpressed", y = unit(1.05, "npc"), vjust = 0,
+      gp = gpar(fontsize = base_fontsize, fontface = "bold")
+    )
+  })
+})
+
+overlap_hmaps <- ggarrange(overlap_hmap, NULL,
+  nrow = 2,
+  heights = c(0.99, 0.01)
+)
+
+overlap_hmaps
+
+saveplot(overlap_hmaps, w = 10, h = 5)
+```
+
+```{r, eval = FALSE, include = FALSE}
+# Plot for Nicole 2024-04-09
+saveplot(
+  overlap_hmaps,
+  path = here(
+    "scratch/2024-04/results_for_nicole/chromatin_states_overlap.png"
+  ),
+  w = 10, h = 5
+)
+```
+
+
+
+## Neighborhood enrichment
+
+```{r plot-neighborhood}
+#| fig-width: 9
+#| fig-height: 5
+neighbor_heatmaps <- list()
+
+neighbor_hmap_width <- unit(1, "in")
+neighbor_hmap_height <- unit(1.2, "in")
+
+heatmap_defaults_nh <- utils::modifyList(heatmap_defaults, list(
+  row_labels = state_abbrevs,
+  rect_gp = gpar(col = NA, lwd = 0)
+))
+
+tss_axis_text <- anno_text(
+  c(rbind("", intervals[c(FALSE, TRUE, FALSE)], ""))[1:21] %>%
+    `[<-`(11, "TSS"),
+  gp = gpar(fontsize = base_fontsize)
+)
+tes_axis_text <- anno_text(
+  c(rbind("", intervals[c(FALSE, TRUE, FALSE)], ""))[1:21] %>%
+    `[<-`(11, "TES"),
+  gp = gpar(fontsize = base_fontsize)
+)
+
+neighbor_heatmaps$expr_tss <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "expr_tss",
+      matrix = get_neighborhood_matrix("expressed-genes", "tss"),
+      show_row_names = TRUE,
+      row_names_side = "left",
+      # row_title = "Expressed",
+      row_title_gp = gpar(fontsize = base_fontsize),
+      # column_title = "TSS",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tss_axis_text),
+      show_column_names = FALSE,
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+draw(neighbor_heatmaps$expr_tss)
+
+neighbor_heatmaps$igno_tss <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "igno_tss",
+      matrix = get_neighborhood_matrix("ignored-genes", "tss"),
+      show_row_names = FALSE,
+      # row_title = "Indeterminate",
+      # column_title = "TSS",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      row_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tss_axis_text),
+      show_column_names = FALSE,
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$react_tss <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "react_tss",
+      matrix = get_neighborhood_matrix("reactive-genes", "tss"),
+      show_row_names = FALSE,
+      # row_title = "Indeterminate",
+      # column_title = "TSS",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      row_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tss_axis_text),
+      show_column_names = FALSE,
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$nonreact_tss <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "nonreact_tss",
+      matrix = get_neighborhood_matrix("non-reactive-genes", "tss"),
+      show_row_names = TRUE,
+      row_names_side = "left",
+      # row_title = "Indeterminate",
+      # column_title = "TSS",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      row_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tss_axis_text),
+      show_column_names = FALSE,
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$noexpr_tss <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "noexpr_tss",
+      matrix = get_neighborhood_matrix("not-expressed-genes", "tss"),
+      show_row_names = FALSE,
+      # row_title = "Non-Expressed",
+      # column_title = "TSS",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      row_title_gp = gpar(fontsize = base_fontsize),
+      show_column_names = FALSE,
+      bottom_annotation = HeatmapAnnotation(intervals = tss_axis_text),
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$expr_tes <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "expr_tes",
+      matrix = get_neighborhood_matrix("expressed-genes", "tes"),
+      show_row_names = FALSE,
+      # column_title = "TES",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      show_column_names = FALSE,
+      bottom_annotation = HeatmapAnnotation(intervals = tes_axis_text),
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$igno_tes <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "igno_tes",
+      matrix = get_neighborhood_matrix("ignored-genes", "tes"),
+      show_row_names = FALSE,
+      show_column_names = FALSE,
+      # column_title = "TES",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tes_axis_text),
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$react_tes <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "react_tes",
+      matrix = get_neighborhood_matrix("reactive-genes", "tes"),
+      show_row_names = FALSE,
+      show_column_names = FALSE,
+      # column_title = "TES",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tes_axis_text),
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$nonreact_tes <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "nonreact_tes",
+      matrix = get_neighborhood_matrix("non-reactive-genes", "tes"),
+      show_row_names = FALSE,
+      show_column_names = FALSE,
+      # column_title = "TES",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tes_axis_text),
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+
+neighbor_heatmaps$noexpr_tes <- local({
+  heatmap_args <- utils::modifyList(heatmap_defaults_nh,
+    list(
+      name = "noexpr_tes",
+      matrix = get_neighborhood_matrix("not-expressed-genes", "tes"),
+      show_row_names = FALSE,
+      show_column_names = FALSE,
+      # column_title = "TES",
+      column_title_gp = gpar(fontsize = base_fontsize),
+      bottom_annotation = HeatmapAnnotation(intervals = tes_axis_text),
+      width = neighbor_hmap_width,
+      height = neighbor_hmap_height
+    )
+  )
+  do.call(Heatmap, heatmap_args)
+})
+```
+
+
+```{r plot-neighbor-heatmaps}
+#| fig-width: 9
+#| fig-height: 5
+
+tss_hmaps <- grid.grabExpr({
+  draw(
+    (neighbor_heatmaps$expr_tss %v% neighbor_heatmaps$igno_tss %v%
+      neighbor_heatmaps$react_tss %v% neighbor_heatmaps$noexpr_tss)
+  )
+})
+tes_hmaps <- grid.grabExpr({
+  draw(
+    (neighbor_heatmaps$expr_tes %v% neighbor_heatmaps$igno_tes %v%
+      neighbor_heatmaps$react_tes %v% neighbor_heatmaps$noexpr_tes)
+  )
+})
+
+neighbor_hmaps <- ggarrange(
+  NULL, tss_hmaps, NULL, tes_hmaps,
+  ncol = 4,
+  widths = c(-0.1, 0.5, -0.20, 0.5)
+)
+
+neighbor_hmaps
+```
+
+```{r, eval = FALSE, include = FALSE}
+saveplot(neighbor_hmaps, w = 9, h = 8)
+
+# Plot for Nicole 2024-04-09
+# saveplot(
+#   neighbor_hmaps,
+#   path = here(
+#     "scratch/2024-04/results_for_nicole/chromatin_states_neighbor.png"
+#   ),
+#   w = 9, h = 8
+# )
+```
+
+## Reactive vs non-reactive genes
+
+```{r chromstates-reactive-vs-nonreactive}
+reactive_v_nonreactive_heatmap <- local({
+  ggarrange(
+    grid.grabExpr({
+      draw(
+        overlap_enrich_heatmap_nonreactive + overlap_enrich_heatmap_reactive2 +
+          neighbor_heatmaps$nonreact_tss + neighbor_heatmaps$nonreact_tes +
+          neighbor_heatmaps$react_tss + neighbor_heatmaps$react_tes,
+        ht_gap = unit(c(0, 5, 2, 3, 2), "mm"),
+        padding = unit(c(-10, 0, 0, 0), "mm")
+      )
+      decorate_heatmap_body("react", {
+        grid.text("Reactive", y = unit(1.05, "npc"), vjust = 0,
+          gp = gpar(fontsize = base_fontsize, fontface = "bold")
+        )
+      })
+      decorate_heatmap_body("nonreact", {
+        grid.text("Non-\nReactive", y = unit(1.05, "npc"), vjust = 0,
+          gp = gpar(fontsize = base_fontsize, fontface = "bold")
+        )
+      })
+      decorate_heatmap_body("react_tss", {
+        grid.text("Reactive", 1, 1.1,
+          gp = gpar(fontsize = base_fontsize, fontface = "bold")
+        )
+      })
+      decorate_heatmap_body("nonreact_tss", {
+        grid.text("Non-Reactive", 1, 1.1,
+          gp = gpar(fontsize = base_fontsize, fontface = "bold")
+        )
+      })
+    })
+  ) +
+    annotate("text", x = 0.08, y = 0.95, label = "a", fontface = "bold",
+      size = base_fontsize - 2) +
+    annotate("text", x = 0.32, y = 0.95, label = "b", fontface = "bold",
+      size = base_fontsize - 2)
+})
+
+ggsave(
+  here("plots/paper/figureS7.pdf"),
+  plot = reactive_v_nonreactive_heatmap,
+  height = 3.3
+)
+```
+
+
+## Chromatin states emission comparison with Rupp et al
+
+```{r chromstates-comparison-rupp}
+rupp_emissions <- read_tsv(
+  here("resources/chromatin-states-PICR/emissions_11_all.txt")
+) %>%
+  rename("state" = "state (Emission order)") %>%
+  column_to_rownames("state") %>%
+  as.matrix() %>%
+  # Make matrix columns same order as our emissions
+  `[`(, colnames(emissions_matrix))
+
+emission_heatmap_defaults <- list(
+  cluster_columns = FALSE,
+  cluster_rows = FALSE,
+  column_names_gp = gpar(fontsize = base_fontsize),
+  row_names_gp = gpar(fontsize = base_fontsize - 1),
+  row_labels = state_list,
+  col = colour_mapping,
+  rect_gp = gpar(col = "white", lwd = 1.5),
+  border_gp = gpar(col = "black", lwd = 1),
+  show_row_names = FALSE,
+  show_heatmap_legend = FALSE,
+  row_names_side = "left",
+  # row_names_gp = gpar(fontsize = base_fontsize),
+  # column_names_gp = gpar(fontsize = base_fontsize),
+  left_annotation = rowAnnotation(
+    r_gap = anno_empty(border = FALSE, width = gap_size)
+  ),
+  bottom_annotation = columnAnnotation(
+    b_gap = anno_empty(border = FALSE, height = gap_size)
+  ),
+  width = unit(cell_size * 6, "cm"),
+  height = unit(cell_size * 11, "cm")
+)
+
+emission_compare_heatmap <- local({
+  heatmap_args <- utils::modifyList(emission_heatmap_defaults,
+    list(
+      matrix = rupp_emissions,
+      name = "rupp",
+      column_title = "PICR",
+      show_row_names = TRUE
+    )
+  )
+  picr_emissions <- do.call(Heatmap, heatmap_args)
+
+  heatmap_args <- utils::modifyList(emission_heatmap_defaults,
+    list(
+      matrix = emissions_matrix,
+      name = "emissions",
+      column_title = "PICRH"
+    )
+  )
+  picrh_emissions <- do.call(Heatmap, heatmap_args)
+
+  grid.grabExpr(draw(picr_emissions + picrh_emissions))
+})
+
+ggsave(
+  here("plots/paper/plot_emissions_comparison.pdf"),
+  plot = emission_compare_heatmap,
+  width = 4.5,
+  height = 3.2
+)
+```
+
+
+
+
+## Genome coverage
+
+```{r genome-cov-plot}
+x_offset <- seq(-0.4, 0.4, 1 / 9)
+
+(genome_coverage_plot <- genome_coverage %>%
+  mutate(
+    # state = as.numeric(state),
+    phase = case_when(
+      timepoint %in% c("Tp5", "Tp6", "Tp7", "Tp8") ~ "Exponential",
+      timepoint %in% c("Tp9", "Tp10", "Tp11", "Tp12") ~ "Stationary",
+      TRUE ~ "error"
+    ),
+    x_pos = case_when(
+      timepoint == "Tp5" ~  as.numeric(state) + x_offset[1],
+      timepoint == "Tp6" ~  as.numeric(state) + x_offset[2],
+      timepoint == "Tp7" ~  as.numeric(state) + x_offset[3],
+      timepoint == "Tp8" ~  as.numeric(state) + x_offset[4],
+      timepoint == "Tp9" ~  as.numeric(state) + x_offset[5],
+      timepoint == "Tp10" ~ as.numeric(state) + x_offset[6],
+      timepoint == "Tp11" ~ as.numeric(state) + x_offset[7],
+      timepoint == "Tp12" ~ as.numeric(state) + x_offset[8]
+    ) %>% rev()
+  ) %>%
+  ggplot(aes(x = fct_rev(state), y = enrichment)) +
+geom_boxplot(width = 0.5, outlier.alpha = 0) +
+# geom_jitter(aes(color = phase)) +
+geom_point(aes(
+  x = x_pos,
+  y = enrichment,
+  fill = phase
+),
+  shape = 21,
+  size = 2,
+  alpha = 0.6
+) +
+coord_flip() +
+scale_fill_manual(values = c("orange", "blue")) +
+scale_x_discrete(
+  labels = state_names
+) +
+labs(
+  fill = "Growth phase",
+  y = "Enrichment"
+) +
+theme_bw() +
+theme(
+  text = element_text(size = 16),
+  axis.title.y = element_blank(),
+  # axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+  legend.position = "top",
+  plot.margin = margin(2, 12, 2, 64)
+)
+)
+
+
+saveplot(genome_coverage_plot)
+```
+
+
+
+# Session Info
+
+```{r session-info}
+save(n_histone_marks, n_chromatin_states, genome_coverage,
+  n_timepoints,
+  file = here(str_glue("results/paper/{prefix}.RData"))
+)
+
+save.image(here(str_glue("results/R/{prefix}/environment.RData")))
+
+session_info()
+```
+
+
+
+

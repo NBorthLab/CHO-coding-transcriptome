@@ -1,0 +1,8 @@
+channels:
+  - conda-forge
+  - bioconda
+  - default
+dependencies:
+  - chromhmm=1.24
+platforms:
+  - linux-64

@@ -1,0 +1,8 @@
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - multiqc=1.14
+  - fastqc=0.12.1
+platforms:
+  - linux-64

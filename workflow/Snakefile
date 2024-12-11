@@ -1,0 +1,46 @@
+import pandas as pd
+from os.path import dirname, splitext
+from itertools import chain
+
+
+# Input and config ===============================
+
+configfile: "workflow/config.yaml"
+
+
+# Execution ======================================
+
+container: "docker://condaforge/mambaforge:4.13.0-1"
+
+
+# Rules ==========================================
+
+include: "rules/common.smk"
+include: "rules/01_preprocessing.smk"
+include: "rules/02_trimming.smk"
+include: "rules/03_alignment.smk"
+include: "rules/04_quantification.smk"
+include: "rules/05_chromatin-states.smk"
+include: "rules/06_analysis.smk"
+include: "rules/qc.smk"
+
+
+# Target rules ===================================
+
+
+rule gather_versions:
+    output: "logs/versions.yaml"
+    conda: "envs/python.yaml"
+    shell:
+        """
+        python workflow/scripts/gather_versions.py
+        """
+
+
+rule all:
+    input:
+        rules.run_quantification.output
+    default_target: True
+
+
+# vim: set syntax=snakemake:

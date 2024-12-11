@@ -1,0 +1,17 @@
+printshellcmds: true
+reason: true
+shadow-prefix: /dev/shm/mriedl-shadow/
+configfile: "workflow/test-config.yaml"
+use-conda: true
+use-singularity: true
+singularity-args: >-
+  --bind /data/borth/mriedl/raw_data
+  --bind /data/borth/nauer/Projects/eCHO/data
+  --bind /data/borth/mpapez/glutamine_depletion_RNAseq_2020/download
+  --bind /data/borth/nnovak/RNAseq/antiAbTCR-prep2/raw/
+  --bind /data/borth/mweinguny/Subclones/RNASeq/raw/bam
+  --bind /data/borth/nnovak/RNAseq/Gerald/raw/bam
+  --bind /data/borth/nnovak/RNAseq/2019_clones/NovaSeq
+  --bind /data/borth/druckerbauer/HJGWWDRXX_20200120B_demux_1
+  --bind /data/borth/druckerbauer/HJGWWDRXX_20200120B_demux_2
+  --bind /data/borth/nnovak/RNAseq/coldShock-polyA/raw/bam

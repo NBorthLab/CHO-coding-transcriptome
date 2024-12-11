@@ -1,0 +1,611 @@
+---
+title: Functional Enrichment
+date: "`r Sys.Date()`"
+---
+
+
+# Find expressed genes in Cell Lines
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(clusterProfiler)
+  library(AnnotationHub)
+  library(org.Mm.eg.db)
+  library(orthogene)
+  library(ggpubr)
+  library(RColorBrewer)
+  library(pathview)
+})
+```
+
+
+```{r params}
+prefix <- "05_functional-enrichment"
+```
+
+# Load data
+
+```{r load-data}
+expressions_cell_lines <- readRDS(
+  here("results/R/04_expressed-genes/expressions_cell_lines.rds")
+)
+
+# Vector of coding genes from the genome annotation
+coding_genes <- readRDS(here("results/R/01_data-preparation/coding_genes.rds"))
+
+# Regex patterns for retrieving the gene sets.
+combinations <- list(
+  "K1_vs_S"       = "en.",       # K1 expressed vs S not expressed
+  "S_vs_K1"       = "ne.",       # K1 not expressed vs S expressed
+  "DXB11_vs_S"    = ".ne",       # DXB11 expressed vs S not expressed
+  "S_vs_DXB11"    = ".en",       # S expressed vs DXB11 not expressed
+  "DXB11_vs_K1"   = "n.e",       # DXB11 expresesd vs K1 not expressed
+  "K1_vs_DXB11"   = "e.n",       # K1 expresed vs DXB11 not exressed
+  "only_K1"       = "e[^e][^e]", # K1 Exclusively expressed
+  "only_S"        = "[^e]e[^e]", # S Exclusively expressed
+  "only_DXB11"    = "[^e][^e]e", # DXB11 exclusively expressed
+  "ignored_somewhere" = "i..|.i.|..i",# Ignored in either one of the cell lines
+  "ignored_all"   = "iii",       # ignored across all cell lines
+  "ignored_k1"    = "i.."
+)
+```
+
+
+# Utility functions
+
+
+```{r util-func-enrichment}
+# FIXME: This is not needed at all.
+# map_geneid_to_alias <- function(gene_ids, value = value) {
+#   bitr(gene_ids, fromType = "ENTREZID", toType = "ALIAS", annot_db_Cg)
+# }
+
+# Utility functions
+attach(load_utils())
+```
+
+
+# Chinese Hamster annotation
+
+
+Loading the Annotation database of the Chinese Hamster.
+
+```{r load-go-chinese-hamster}
+annotation_snapshot <- "2023-10-21"
+annotation_id <- "AH114610"
+
+annotation_hub <- AnnotationHub()
+snapshotDate(annotation_hub) <- annotation_snapshot
+
+AnnotationHub::query(annotation_hub,
+  "Cricetulus griseus")[annotation_id]
+
+annot_db_Cg <- AnnotationHub::query(annotation_hub,
+  "Cricetulus griseus")[[annotation_id]]
+
+saveobj(annot_db_Cg)
+```
+
+We need to get the gene **universe**. The gene universe is the set of all genes
+that *had a chance* to pop up in the analysis, i.e. the assessment of expressed
+genes. In our case this needs to be the **protein-coding** genes! We need to map
+the gene symbol to the entrez gene ID.
+
+```{r hamster-universe}
+universe_Crigri <- coding_genes %>%
+  clean_up_alias() %>%
+  map_symbol_to_geneid() %>%
+  unique()
+
+saveobj(universe_Crigri)
+```
+
+```{r, include = FALSE, eval = FALSE}
+keytypes(annot_db_Cg)
+
+test <- select(annot_db_Cg,
+  universe_Crigri,
+  c("SYMBOL", "ONTOLOGY", "GOALL", "EVIDENCEALL", "GO", "EVIDENCE"),
+  "ENTREZID")
+
+head(test)
+
+test %>%
+  filter(ONTOLOGY == "BP") %>%
+  pull(ENTREZID) %>%
+  unique()
+```
+
+
+
+## Gene Ontology
+
+```{r gotea}
+go_term_enrichment <- xfun::cache_rds({
+  combinations %>%
+    map(function(x) {
+      get_geneset(expressions_cell_lines, x) %>%
+        clean_up_alias() %>%
+        map_symbol_to_geneid() %>%
+        enrich_GO_terms(db = annot_db_Cg, universe = universe_Crigri)
+    })
+},
+  file = "go_term_enrichment",
+  dir = here("analysis/cache/"),
+  hash = list(expressions_cell_lines, annot_db_Cg, universe_Crigri)
+)
+
+go_terms_df <- go_term_enrichment %>%
+  map((\(x) x@result))
+
+go_term_enrichment %>%
+  map(as.data.frame) %>%
+  rio::export(here("results/analysis/go_terms_enriched.xlsx"))
+
+saveobj(go_term_enrichment)
+```
+
+## KEGG Pathways
+
+
+```{r kegg-ora}
+kegg_enrichment <- xfun::cache_rds({
+  combinations %>%
+    map(function(x) {
+      get_geneset(expressions_cell_lines, x) %>%
+        clean_up_alias() %>%
+        map_symbol_to_geneid() %>%
+        enrich_KEGG_pathways(
+          organism = "cge",
+          organism_db = annot_db_Cg,
+          universe = universe_Crigri
+        )
+    })
+},
+  file = "kegg_enrichment",
+  dir = here("analysis/cache/"),
+  hash = list(expressions_cell_lines, universe_Crigri, annot_db_Cg)
+)
+
+n_kegg_enriched <- map(kegg_enrichment,
+  (\(x) filter(x@result, p.adjust < 0.05) %>% nrow())
+)
+
+kegg_df <- kegg_enrichment %>%
+  `[`(n_kegg_enriched > 0) %>%
+  map((\(x) x@result))
+
+saveobj(kegg_enrichment)
+```
+
+# Mouse annotation
+
+The Chinese Hamster annotation is far from perfect. We're going to do the GO
+term enrichment and the KEGG pathway over representation analysis (ORA) for
+Mouse as well to see if there is a major difference (or improvement).
+
+Loading the Annotation database of the Mouse.
+
+```{r mm-annotation}
+# Mouse (Mus musculus) Annotation DB
+(annot_db_Mm <- org.Mm.eg.db)
+```
+
+Finding the orthologous genes between Chinese Hamster and Mouse is not trivial.
+I'd rather rely on packages and databases for this task instead of simply
+assuming that the gene symbol or the same between species.
+There is a nice package that allows for easy conversion of genes between
+species.
+
+**NOTE:** The package relies on the Ensembl Chinese Hamster genome annotation
+which is the CHOK1GS genome assembly, not the PICRH!!!
+
+Why not using the ENTREZ gene IDs for conversion?  
+Because it yields much fewer mapping results. Only 55% compared to 71% when
+using gene symbols, even when considering only unambiguous (1:1) mapping of
+genes.
+
+```{r mm-universe}
+mm_orthologs_map <- coding_genes %>%
+  clean_up_alias() %>%
+  unique() %>%
+  {
+    (orthology_report <<- utils::capture.output(
+      result <- convert_orthologs(.,
+        input_species = "Cricetulus griseus",
+        output_species = "Mus musculus",
+        gene_output = "columns",
+        method = "gprofiler"
+      ),
+      type = "message"
+    ))
+    result
+  } %>%
+  # Wrong conversion of Gene Symbols to Mouse in some cases.
+  # Mouse Symbols are by convention always upper case first letter, then lower
+  # case. Same as the Chinese Hamster convention.
+  mutate(
+    ortholog_gene = recode(ortholog_gene, PTPRG = "Ptprg")
+  )
+
+print(orthology_report[28:33])
+
+head(mm_orthologs_map)
+dim(mm_orthologs_map)
+
+universe_Musmus <- mm_orthologs_map$ortholog_gene %>%
+  map_symbol_to_geneid(annot = annot_db_Mm)
+
+get_mouse_ortholog <- function(gene) {
+  dplyr::filter(mm_orthologs_map, input_gene %in% gene)$ortholog_gene
+}
+```
+
+
+## Gene Ontology
+
+```{r mm-gotea}
+mm_go_term_enrichment <- xfun::cache_rds({
+  combinations %>%
+    map(function(x) {
+      get_geneset(expressions_cell_lines, x) %>%
+        clean_up_alias() %>%
+        get_mouse_ortholog() %>%
+        map_symbol_to_geneid(annot = annot_db_Mm) %>%
+        enrich_GO_terms(db = annot_db_Mm, universe = universe_Musmus)
+    })
+},
+  file = "mm_go_term_enrichment",
+  dir = here("analysis/cache/"),
+  hash = list(expressions_cell_lines, universe_Musmus, annot_db_Mm)
+)
+
+mm_go_term_enrichment %>%
+  map(as.data.frame) %>%
+  rio::export(here("results/analysis/go_terms_enriched_mm.xlsx"))
+
+saveobj(mm_go_term_enrichment)
+```
+
+## KEGG Pathways
+
+```{r kegg-mouse}
+mm_kegg_enrichment <- xfun::cache_rds({
+  combinations %>%
+    map(function(x) {
+      get_geneset(expressions_cell_lines, x) %>%
+        clean_up_alias() %>%
+        map_symbol_to_geneid(annot = annot_db_Mm) %>%
+        enrich_KEGG_pathways(
+          organism = "mmu",
+          organism_db = annot_db_Mm,
+          universe = universe_Musmus
+        )
+    })
+},
+  file = "mm_kegg_enrichment",
+  dir = here("analysis/cache/"),
+  hash = list(expressions_cell_lines, universe_Musmus, annot_db_Mm)
+)
+
+saveobj(mm_kegg_enrichment)
+```
+
+
+
+# Results
+
+## General stats for mapping to mouse annotation
+
+Fraction of LOC-genes in the coding transcriptome of the Chinese Hamster.
+These genes don't have a gene symbol and are only referred to as LOC + the gene
+ID.
+
+```{r percent-loc-genes}
+# LOC genes start with LOC, duh.
+loc_genes <- str_subset(coding_genes, "^LOC*")
+# All other genes don't, also duh.
+non_loc_genes <- str_subset(coding_genes, "^(?!LOC).*")
+
+# Those two gene sets must sum up to the number of all coding genes
+length(loc_genes) + length(non_loc_genes) == length(coding_genes)
+
+(fraction_loc_genes <- length(loc_genes) / length(coding_genes))
+```
+
+Therefore, `r format(fraction_loc_genes * 100, digits = 4)` percent of all
+coding genes are LOC genes that can probably not be properly mapped to the
+corresponding mouse gene.
+
+
+
+## Plotting functions
+
+```{r dotplot-util-function}
+make_dotplot <- function(
+    enrichment_result,
+    pval_lower_limit = 1e-4,
+    scale_limits = c(1, 3),
+    scale_range = c(3, 6),
+    scale_breaks = 1:3,
+    title = NULL
+) {
+  p <- dotplot(enrichment_result,
+    showCategory = 6,
+    label_format = 25
+  ) +
+  ggplot2::scale_size(
+    limits = scale_limits,
+    range = scale_range,
+    breaks = scale_breaks
+  ) +
+  ggplot2::scale_fill_distiller(
+    palette = "OrRd",
+    limits = c(pval_lower_limit, 0.05)
+  ) +
+  ggplot2::scale_x_continuous(expand = ggplot2::expansion(mult = 0.5)) +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(size = 8),
+    axis.text.y = ggplot2::element_text(size = 8),
+    legend.key.width = ggplot2::unit(1, "cm")
+    # plot.background = ggplot2::element_blank()
+  )
+
+  if (!is.null(title)) {
+    p <- p + ggplot2::labs(title = title)
+  }
+
+  return(p)
+}
+```
+
+```{r cnetplot-util-function}
+make_cnetplot <- function(geneset) {
+  geneset@result <- geneset %>%
+    `@`(result) %>%
+    mutate(
+      Description = str_remove(
+        Description,
+        " - Cricetulus griseus \\(Chinese hamster\\)"
+      )
+    )
+
+  cnetplot(geneset,
+    node_label = "category",
+    cex_gene = 0.05,
+    cex_label_category = 0.9
+  ) +
+  theme(plot.background = element_rect(fill = "white"))
+}
+```
+
+
+
+## Gene Ontology
+
+
+### Hamster annotation
+
+```{r plot-hamster-goterms}
+n_goterms_enriched <- map(go_term_enrichment, (\(x) nrow(x@result)))
+
+go_dotplots <- go_term_enrichment %>%
+  `[`(n_goterms_enriched > 0) %>%
+  map(make_dotplot)
+
+(arranged_dotplots <- ggarrange(
+  go_dotplots$K1_vs_S, go_dotplots$DXB11_vs_K1,
+  NULL, NULL,
+  go_dotplots$K1_vs_DXB11, go_dotplots$only_DXB11,
+  nrow = 3, ncol = 2,
+  heights = c(0.5, -0.03, 0.5),
+  labels = c("K1 vs S", "DXB11 vs K1", "", "", "K1 vs DXB11", "only DXB11"),
+  common.legend = TRUE
+)
+)
+
+saveplot(arranged_dotplots)
+```
+
+No GO terms were found for indeterminate genes.
+
+
+### Mouse annotation
+
+```{r plot-mouse-go-terms}
+mm_n_go_terms_enriched <- map(mm_go_term_enrichment, (\(x) nrow(x@result)))
+
+mm_go_dotplots <- mm_go_term_enrichment %>%
+  `[`(mm_n_go_terms_enriched > 0) %>%
+    map(make_dotplot,
+      pval_lower_limit = 1e-10,
+      scale_limits = c(1, 9),
+      scale_range = c(3, 6),
+      scale_breaks = c(3, 6, 9)
+    )
+
+str(mm_go_dotplots, max.level = 1)
+
+(mm_arranged_dotplots <- ggarrange(
+  mm_go_dotplots$K1_vs_S, mm_go_dotplots$DXB11_vs_S, 
+  NULL, NULL,
+  mm_go_dotplots$DXB11_vs_K1, mm_go_dotplots$only_K1, 
+  nrow = 3, ncol = 2,
+  heights = c(0.5, -0.03, 0.5),
+  labels = c("K1 vs S", "DXB11 vs S", "DXB11 vs K1", "only K1"),
+  common.legend = TRUE
+))
+
+saveplot(mm_arranged_dotplots)
+```
+
+## KEGG Pathways
+
+### Hamster annotation
+
+```{r kegg-enrichment-chinese-hamster}
+kegg_dotplots <- kegg_enrichment %>%
+  `[`(n_kegg_enriched > 0) %>%
+  map(function(x) {
+    x@result <- x %>%
+      `@`(result) %>%
+      mutate(
+        Description = str_remove(
+          Description,
+          " - Cricetulus griseus \\(Chinese hamster\\)"
+        )
+      )
+    x
+  }) %>%
+  map(make_dotplot,
+    pval_lower_limit = 1e-30,
+    scale_limits = c(1, 150),
+    scale_range = c(1, 6),
+    scale_breaks = c(25, 50, 75, 100, 125, 150)
+  )
+
+ggarrange(
+  kegg_dotplots$DXB11_vs_S, kegg_dotplots$only_S, kegg_dotplots$only_DXB11,
+  nrow = 1,
+  common.legend = TRUE
+)
+
+(kegg_dotplot_indet_somewhere <- kegg_dotplots$ignored_somewhere
+  + labs(title = "KEGG Pathways - Indeterminate expression"))
+saveplot(kegg_dotplot_indet_somewhere, h = 4, w = 6)
+
+# saveplot(
+#   kegg_dotplot_indet_somewhere,
+#   path = here(
+#     "scratch/2024-04/results_for_nicole/kegg_indeterminate_dotplot.png"
+#   ),
+#   h = 4,
+#   w = 6
+# )
+```
+
+
+```{r hasmter-cnetplots}
+kegg_cnetplots <- kegg_enrichment %>%
+  `[`(n_kegg_enriched > 0) %>%
+  map(make_cnetplot)
+(kegg_cnetplot_indet_somewhere <- kegg_cnetplots$ignored_somewhere)
+
+saveplot(kegg_cnetplot_indet_somewhere)
+
+# saveplot(
+#   kegg_cnetplot_indet_somewhere +
+#     labs(title = "KEGG Pathways - Indeterminate expression"),
+#   path = here("scratch/2024-04/results_for_nicole/kegg_indeterminate_cnet.png"),
+#   w = 7, h = 5
+# )
+```
+
+Here, I found the ribosome and cytokine pathways interesting. We can have a
+closer look at those.
+
+```{r kegg-pathways-of-interest}
+# Cytokine-Cytokine receptor interaction -> cge0460
+cytokine_pw_id <- "cge04060"
+# Ribosome -> cge03010
+ribosome_pw_id <- "cge03010"
+
+(ribosome_pw <- kegg_enrichment$ignored_somewhere@result %>%
+  filter(ID == ribosome_pw_id) %>%
+  dplyr::select(GeneRatio, BgRatio)
+)
+
+(cytokine_pw <- kegg_enrichment$ignored_somewhere@result %>%
+  filter(ID == cytokine_pw_id) %>%
+  dplyr::select(GeneRatio, BgRatio)
+)
+```
+
+Additionally, I can visualise the KEGG pathway with the pathview package.
+
+```{r ribosome-pathway-map}
+ribosome_pw_enriched_genes <- kegg_enrichment$ignored_somewhere@result %>%
+  filter(ID == ribosome_pw_id) %>%
+  {
+    ribosome_pw_pval <<- .$p.adjust
+    .
+  } %>%
+  pull(geneID) %>%
+  str_split("/") %>%
+  `[[`(1) %>%
+  bitr("SYMBOL", "ENTREZID", annot_db_Cg) %>%
+  `$`(ENTREZID)
+
+ribosome_pw_geneset <-
+  kegg_enrichment$ignored_somewhere@geneSets[[ribosome_pw_id]]
+
+ribosome_pw_is_enriched <- case_when(
+  ribosome_pw_geneset %in% ribosome_pw_enriched_genes ~ 1,
+  TRUE ~ 0
+)
+
+run_pathview(
+  gene.data = ribosome_pw_enriched_genes,
+  pathway.id = ribosome_pw_id,
+  species = "cge"
+)
+```
+
+```{r cytokine-pathway-map}
+cytokine_pw_enriched_genes <- kegg_enrichment$ignored_somewhere@result %>%
+  filter(ID == cytokine_pw_id) %>%
+  {
+    cytokine_pw_pval <<- .$p.adjust
+    .
+  } %>%
+  pull(geneID) %>%
+  str_split("/") %>%
+  `[[`(1) %>%
+  bitr("SYMBOL", "ENTREZID", annot_db_Cg) %>%
+  `$`(ENTREZID)
+
+run_pathview(
+  gene.data = cytokine_pw_enriched_genes,
+  pathway.id = cytokine_pw_id,
+  species = "cge"
+)
+```
+
+
+
+### Mouse annotation
+
+```{r kegg-enrichment-mouse}
+mm_n_kegg_enriched <- map(mm_kegg_enrichment,
+  (\(x) filter(x@result, p.adjust < 0.05) %>% nrow())
+)
+
+mm_kegg_dotplots <- mm_kegg_enrichment %>%
+  `[`(mm_n_kegg_enriched > 0) %>%
+  map(make_dotplot,
+    pval_lower_limit = 1e-12,
+    scale_limits = c(1, 75),
+    scale_range = c(2, 6),
+    scale_breaks = c(25, 50, 75)
+  )
+
+(mm_kegg_dotplot_indet_somewhere <- mm_kegg_dotplots$ignored_somewhere)
+saveplot(mm_kegg_dotplot_indet_somewhere)
+```
+
+
+# Session Info
+
+```{r session-info}
+save(
+  ribosome_pw, ribosome_pw_pval, cytokine_pw, cytokine_pw_pval,
+  annotation_snapshot, annotation_id, go_terms_df,
+  file = here(str_glue("results/paper/{prefix}.RData"))
+)
+
+save.image(here(str_glue("results/R/{prefix}/environment.RData")))
+
+session_info()
+```

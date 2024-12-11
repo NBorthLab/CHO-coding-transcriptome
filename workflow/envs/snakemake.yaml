@@ -1,0 +1,9 @@
+name: P02-snakemake
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - snakemake
+  - graphviz
+platforms:
+  - linux-64

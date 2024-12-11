@@ -1,0 +1,248 @@
+---
+title: Data preparation
+date: "`r Sys.Date()`"
+---
+
+
+# Description
+
+Perform data preparation for downstream analyses.
+This includes loading of raw counts, metadata, filtering of genes and outlier
+samples as well as conversion and exporting of prepared data into useful data
+structures.
+
+
+# Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(DESeq2)
+  library(edgeR)
+})
+```
+
+```{r params}
+prefix <- "01_data-preparation"
+```
+
+
+# Load data
+
+## Raw counts
+
+The output of `featureCounts` is a tab-separated file for each sample.
+I concatenated all counts from each sample into one tsv, yielding:
+
+```{bash head-tsv-file}
+cut -f1-4 results/counts/all.tsv | head -n 4
+```
+
+Basically, integer counts $\in \mathbb{N}_0$
+
+```{r load-counts}
+raw_counts_matrix <- read_table(here("results/counts/all.tsv")) %>%
+  column_to_rownames("Geneid") %>%
+  as.matrix()
+
+colnames(raw_counts_matrix) <- colnames(raw_counts_matrix) %>%
+  str_remove(".*/") %>%
+  str_remove("_.")
+
+str(raw_counts_matrix)
+
+n_raw_samples <- ncol(raw_counts_matrix)
+n_raw_genes <- nrow(raw_counts_matrix)
+```
+
+Loaded counts matrix of `r n_raw_samples` samples and
+`r n_raw_genes` genes.
+
+
+
+
+## Metadata
+
+Loading the metadata corresponding to each sample.
+
+```{r load-metadata}
+(metadata <- read_csv(here("resources/all-runs_experimental_condition.csv")) %>%
+  mutate(LibraryStrategy = case_when(
+    LibraryStrategy == "rRNA" ~ "rRNA",
+    TRUE ~ "PolyA"
+  )) %>%
+  dplyr::select(-RunAccession) %>%
+  unique() %>%
+  mutate(
+    LibraryStrategy = factor(LibraryStrategy, levels = c("rRNA", "PolyA")),
+    CellLine = factor(CellLine, levels = c("CHO-K1", "CHO-S", "CHO-DXB11"))
+  )
+)
+
+setequal(metadata$SampleAccession, colnames(raw_counts_matrix))
+
+library_sizes <- colSums(raw_counts_matrix)
+
+metadata <- full_join(
+  metadata,
+  tibble(SampleAccession = names(library_sizes), LibrarySize = library_sizes),
+  by = "SampleAccession"
+)
+
+
+# NOTE: Temporary fix for new dataset (leaving it out for now)
+# metadata <- metadata %>%
+#   filter(DatasetAccession != "SRP281874")
+
+saveobj(metadata)
+```
+
+
+## Create SummarizedExperiment object
+
+SummarizedExperiment is a widely accepted standard among Bioconductor packages.
+Both, DESeq2 and edgeR can work seamlessly with it. Therefore we will save the
+data as SummarizedExperiment objects, containing the read counts as well as the
+corresponding metadata to the samples.
+
+The nice thing is also that we can save several so-called asssays alongside each
+other. This means that we have the we can save the raw counts and later the
+normalized counts all in one R object.
+
+**NOTE: Removal of outliers**
+
+Later, the CPM distribution of one dataset will look highly suspicious: INH02.
+I don't trust that since all other looks highly similar in their $\log$ CPM
+distribution.
+I will filter out this dataset here already.
+Look at the ridge plots below to see why I did that.
+
+
+```{r create-summarized-experiement}
+(raw_counts_SE <- local({
+  counts <- SummarizedExperiment(
+    assay = list(raw_counts = raw_counts_matrix),
+    colData = metadata
+  )
+  # SEE NOTE ABOVE!!!
+  counts[, !str_detect(colnames(counts), "(INH02|INH0601)")]
+})
+)
+
+(n_samples <- colData(raw_counts_SE) %>%
+  as.data.frame() %>%
+  group_by(CellLine) %>%
+  summarize(n = n()) %>%
+  pull(n, name = CellLine)
+)
+(n_datasets <- colData(raw_counts_SE) %>%
+  as.data.frame() %>%
+  select(DatasetName, CellLine) %>%
+  group_by(CellLine) %>%
+  unique() %>%
+  summarize(n = n()) %>%
+  pull(n, name = CellLine)
+)
+# metadata of only the samples in the analysis, excluding the filtered.
+samples_metadata <- colData(raw_counts_SE) %>% as.data.frame()
+
+saveobj(raw_counts_SE)
+```
+
+
+# Explore metadata
+
+The metadata exploration is done in an interactive shiny HTML page served by the
+script "`metadata.R`" in the analysis directory. Run the entire script with R
+(or Rscript) and go to [localhost:8071](localhost:8071) to view it.
+
+```{bash, eval = FALSE}
+Rscript analysis/metadata.R
+```
+
+
+# Protein-coding Genes
+
+## Annotation
+
+We are conducting the analysis only with coding genes, therefore we load the
+annotation file `.gtf` which is accompanied with any genome.
+The GTF file includes information about the genome features that we counted.
+It's basically just a TSV file.
+The file type specification of GTF can be found
+[here](https://www.ensembl.org/info/website/upload/gff.html).
+
+
+```{r load-annotation}
+genome_annotation <- rtracklayer::import(here(
+  "resources/raw_data/genome/GCF_003668045.3_CriGri-PICRH-1.0_genomic.gtf.gz"
+))
+```
+
+
+## Filter Coding genes
+
+We only need the coding genes, so we filter the genes out to include only the
+coding genes.
+Whether a gene is coding or not can be extracted from the attributes.
+For example here in Gapdh, a well-known housekeeping gene:
+
+```{r gapdh-annotation}
+genome_annotation[genome_annotation$gene_id == "Gapdh"]$gene_biotype
+```
+
+Only the 'gene' feature is annotated with the 'gene_biotype'.
+
+Get only protein-coding genes and then a character vector of all those genes.
+
+```{r get-coding-genes}
+coding_annotation <- genome_annotation %>%
+  `[`(.$gene_biotype == "protein_coding" & !is.na(.$gene_biotype))
+
+coding_genes <- coding_annotation$gene_id
+
+str(coding_genes)
+saveobj(coding_genes)
+
+n_coding_genes <- length(coding_genes)
+```
+
+Quick sanity check in between:
+All coding genes must be present in the count matrix since they are a subset
+of all genes.
+
+```{r check-genes}
+# Must be true
+all(coding_genes %in% rownames(raw_counts_matrix))
+```
+
+On the other hand, not all rows/genes from the counts matrix are coding,
+therefore not all are in the set of coding genes.
+The exact numbers are:
+
+```{r n-coding-genes}
+table(rownames(raw_counts_matrix) %in% coding_genes)
+```
+
+We do the actual filtering now:
+
+```{r filter-coding-genes}
+# Filter Coding Genes
+coding_counts_SE <- raw_counts_SE[coding_genes, ]
+
+saveobj(coding_counts_SE)
+```
+
+
+# Session Info
+
+```{r session-info}
+save(
+  n_coding_genes, n_samples, n_datasets, n_raw_genes, samples_metadata,
+  file = here(str_glue("results/paper/{prefix}.RData"))
+)
+
+session_info()
+```
+

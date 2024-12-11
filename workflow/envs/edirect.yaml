@@ -1,0 +1,7 @@
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - entrez-direct=16.2
+platforms:
+  - linux-64

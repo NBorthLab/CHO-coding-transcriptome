@@ -1,0 +1,5 @@
+[style]
+based_on_style = google
+DEDENT_CLOSING_BRACKETS = true
+SPACES_AROUND_DEFAULT_OR_NAMED_ASSIGN = true
+COALESCE_BRACKETS = true

@@ -1,0 +1,937 @@
+---
+title: Expressed genes in Cell Lines
+date: "`r Sys.Date()`"
+author: Markus Riedl
+---
+
+
+# Find expressed genes in Cell Lines
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(SummarizedExperiment)
+  library(RColorBrewer)
+  library(ggpubr)
+  library(VennDiagram)
+  library(gridExtra)
+  library(ggh4x)
+  library(grid)
+  library(gggrid)
+  library(ComplexHeatmap)
+  library(ComplexUpset)
+})
+```
+
+
+```{r params}
+prefix <- "04_expressed-genes"
+```
+
+
+## Load data
+
+```{r load-data}
+#' Clean up gene alias, i.e. remove the underscore something from the gene
+#' alias.
+# clean_up_alias <- function(dirty_alias) {
+#   return(stringr::str_replace(dirty_alias, "_.", ""))
+# }
+
+# SummarizedExperiment object of the normalized log2 CPM expressions.
+normalized_counts_SE <- readRDS(
+  here("results/R/02_normalization/normalized_counts_SE.rds")
+)
+
+normalized_logcpm <- assays(normalized_counts_SE)$normalized_logcpm
+
+# Utility functions get_geneset and get_geneset_size
+source(here("analysis/99_util.R"))
+```
+
+# Stratification of genes
+
+
+We define genes as
+
+- **highly expressed** is a gene if the TMM-normalized logCPM is $>0$ in a
+  $>95$% of a cell line's samples and
+- **not or lowly expressed** is gene if the TMM-normalized logCPM is $>0$ in
+  $<5$% of a cell lines's samples.
+  Or, in other words, $\leq 0$ in $> 95$% of a cell lines's samples.
+
+With this definition we move on.
+
+We have to ignore any genes that are inbetween those two thresholds since
+otherwise we would greatly inflate false positive findings.
+
+```{r is-expressed}
+expression_threshold <- 0
+
+is_expressed <- normalized_logcpm > expression_threshold
+```
+
+
+# Stratification in Cell Lines
+
+
+```{r threshold-fractions-plot}
+expression_threshold_histogram <- local({
+
+  chok1_samples <- normalized_counts_SE %>%
+    colData() %>%
+    as.data.frame() %>%
+    filter(CellLine == "CHO-K1") %>%
+    pull(SampleAccession)
+
+  n_chok1_samples <- length(chok1_samples)
+
+  # Subset bool matrix to only cell line samples
+  chok1_is_expressed <- is_expressed[, chok1_samples]
+
+  # Fraction of samples in which the gene is expressed
+  chok1_expression_fractions <- rowSums(chok1_is_expressed) / n_chok1_samples
+
+  hist(chok1_expression_fractions)
+})
+
+local({
+  path <- here(str_glue("plots/{prefix}/expression_threshold_histogram.pdf"))
+  if (!dir.exists(dirname(path))) {
+    dir.create(dirname(path), recursive = TRUE)
+  }
+  pdf(
+    file = path,
+    height = 5
+  )
+  plot(expression_threshold_histogram)
+  dev.off()
+})
+```
+
+
+```{r find-expressed-genes}
+cell_lines <- normalized_counts_SE$CellLine %>% unique()
+
+expressions_cell_lines <- cell_lines %>%
+  map(function(cell_line) {
+    # samples of the cell line
+    cell_line_samples <- normalized_counts_SE %>%
+      colData() %>%
+      as.data.frame() %>%
+      filter(CellLine == cell_line) %>%
+      pull(SampleAccession)
+
+    n_samples <- length(cell_line_samples)
+
+    # Subset bool matrix to only cell line samples
+    is_expressed_cell_line <- is_expressed[, cell_line_samples]
+
+    # Fraction of samples in which the gene is expressed
+    cell_line_expression_fractions <-
+      rowSums(is_expressed_cell_line) / n_samples
+
+    case_when(
+      cell_line_expression_fractions > 0.95 ~ "e",
+      cell_line_expression_fractions < 0.05 ~ "n",
+      TRUE ~ "i"
+    )
+    # Expresed / not expressed genes
+    # genesExpr <- names(clExprFracs)[clExprFracs > 0.95]
+    # genesNoExpr <- names(clExprFracs)[clExprFracs < 0.05]
+    #
+    # return(list(genesExpr = genesExpr, genesNoExpr = genesNoExpr))
+  }) %>%
+  `names<-`(cell_lines) %>%
+  do.call(cbind, .) %>%
+  `rownames<-`(rownames(is_expressed))
+
+saveobj(expressions_cell_lines)
+
+# NOTE: Usage example of utility functions
+get_geneset(expressions_cell_lines, "e.n")
+get_geneset_size(expressions_cell_lines, "e.n")
+```
+
+## Results
+
+```{r define-color-palette}
+(color_palette <- brewer.pal(6, "Paired"))
+#      K1 low    K1 high   DXBlow    DXBhi      S low      S high
+#        1          2         3        4          5         6
+# [1] "#A6CEE3" "#1F78B4" "#B2DF8A" "#33A02C" "#FB9A99" "#E31A1C"
+```
+
+### Fractions of expressed/censored/non-expressed genes
+
+
+```{r fractions-gene-sets-plot}
+fractions_colors <- c(
+  color_palette[c(2)], "grey", color_palette[c(1, 6)],
+  "grey", color_palette[c(5, 4)], "grey", color_palette[3]
+)
+
+expression_fractions <- tribble(
+  ~cline, ~gene_fraction, ~size,
+  "CHO-K1",  "expressed",      get_geneset_size(expressions_cell_lines,  "e.."),
+  "CHO-K1",  "ignored",        get_geneset_size(expressions_cell_lines,  "i.."),
+  "CHO-K1",  "not-expressed",  get_geneset_size(expressions_cell_lines,  "n.."),
+  "CHO-S",   "expressed",      get_geneset_size(expressions_cell_lines,  ".e."),
+  "CHO-S",   "ignored",        get_geneset_size(expressions_cell_lines,  ".i."),
+  "CHO-S",   "not-expressed",  get_geneset_size(expressions_cell_lines,  ".n."),
+  "CHO-DXB", "expressed",      get_geneset_size(expressions_cell_lines,  "..e"),
+  "CHO-DXB", "ignored",        get_geneset_size(expressions_cell_lines,  "..i"),
+  "CHO-DXB", "not-expressed",  get_geneset_size(expressions_cell_lines,  "..n")
+) %>%
+  mutate(
+    cline = factor(cline,
+      levels = c("CHO-K1", "CHO-S", "CHO-DXB"),
+      labels = c("CHO-K1", "CHO-S", "CHO-DXB11")
+    ),
+    gene_fraction = factor(gene_fraction,
+      levels = c("expressed", "ignored", "not-expressed")
+    )
+  ) %>%
+  print()
+
+cell_line_fractions_plot <- expression_fractions %>%
+  ggplot(aes(x = cline, y = size, fill = interaction(gene_fraction, cline))) +
+  geom_bar(stat = "identity") +
+  labs(x = "", y = "Number of genes") +
+  scale_fill_manual(values = fractions_colors) +
+  scale_y_continuous(
+    sec.axis = sec_axis(~ . / 1e4,
+      breaks   = c(0.45, 1.05, 1.6),
+      labels   = c("Non-expressed", "Indeterminate", "Expressed")
+    )
+  ) +
+  theme_bw() +
+  theme(
+    legend.position    = "none",
+    axis.text.x        = element_text(size = 14),
+    axis.title.y       = element_text(size = 14),
+    axis.text.y        = element_text(size = 12),
+    axis.ticks.y.right = element_blank(),
+    axis.text.y.right  = element_text(size = 14)
+  )
+
+cell_line_fractions_plot
+```
+
+```{r save-fractionsplot}
+saveplot(cell_line_fractions_plot)
+```
+
+```{r, eval = FALSE, include = FALSE}
+saveplot(cell_line_fractions_plot,
+  path = here("scratch/2024-04/results_for_nicole/expression_fractions.png"),
+  w = 7, h = 7
+)
+```
+
+
+Add fractions/geneset sizes that are interesting for the manuscript.
+
+```{r add-fractions}
+cell_line_fractions <- expression_fractions %>%
+  mutate(
+    cline = factor(cline, levels = c("CHO-K1", "CHO-S", "CHO-DXB", "Any"))
+  ) %>%
+  add_row(
+    cline = "Any",
+    gene_fraction = "ignored",
+    size = get_geneset_size(expressions_cell_lines, "i..|.i.|..i")
+  )
+```
+
+
+
+### Expressed vs non-expressed genes
+
+#### Sizes of intersections
+
+
+```{r intersections-bar-plot}
+intersect_data <- tribble(
+  ~cline_hi, ~cline_low, ~size,
+  "CHO-K1",     "CHO-S",      get_geneset_size(expressions_cell_lines, "en."),
+  "CHO-K1",     "CHO-DXB11",  get_geneset_size(expressions_cell_lines, "e.n"),
+  "CHO-S",      "CHO-K1",     get_geneset_size(expressions_cell_lines, "ne."),
+  "CHO-S",      "CHO-DXB11",  get_geneset_size(expressions_cell_lines, ".en"),
+  "CHO-DXB11",  "CHO-K1",     get_geneset_size(expressions_cell_lines, "n.e"),
+  "CHO-DXB11",  "CHO-S",      get_geneset_size(expressions_cell_lines, ".ne")
+) %>%
+  mutate(
+    cline_intersect = interaction(cline_hi, cline_low),
+    cline_intersect = factor(
+      cline_intersect,
+      levels = c(
+        "CHO-K1.CHO-S", "CHO-K1.CHO-DXB11",
+        "CHO-S.CHO-K1", "CHO-S.CHO-DXB11",
+        "CHO-DXB11.CHO-K1", "CHO-DXB11.CHO-S"
+      )
+    ),
+    cline_hi = factor(cline_hi, levels = c("CHO-K1", "CHO-S", "CHO-DXB11"))
+  ) %>%
+  print()
+
+n_diff_expr <- intersect_data %>%
+  pull(size, name = cline_intersect)
+
+intersection_sizes <- pull(intersect_data, size) %>%
+  `names<-`(intersect_data$cline_intersect)
+
+intersect_graph <- intersect_data %>%
+  ggplot(aes(
+    x = cline_intersect,
+    y = size,
+    fill = cline_hi
+  )) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = size), vjust = -0.25, size = 5) +
+  # guides(x = "axis_nested") +
+  scale_y_continuous(
+    limits = c(0, 179),
+    breaks = seq(0, 175, by = 25),
+    expand = expansion(mult = c(0, .08))
+  ) +
+  scale_fill_manual(values = color_palette[c(2, 6, 4)]) +
+  labs(y = "Intersection size") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    axis.title.y = element_text(margin = margin(r = -180), size = 16),
+    axis.text.y = element_text(size = 14),
+    legend.position = "none"
+  )
+
+intersect_table <- intersect_data %>%
+  dplyr::select(cline_hi, cline_low, cline_intersect) %>%
+  pivot_longer(cols = -cline_intersect, names_to = "expr_level") %>%
+  mutate(
+    coloring = interaction(expr_level, value),
+    x = case_when(
+      expr_level == "cline_hi" & value == "CHO-K1" ~ 1.5,
+      TRUE ~ 0
+    )
+  )
+
+intersect_table <- tribble(
+  ~x, ~y, ~label,
+  1.5, "expr", "CHO-K1",
+  3.5, "expr", "CHO-S",
+  5.5, "expr", "CHO-DXB11",
+  1.0, "nonexpr", "CHO-S",
+  2.0, "nonexpr", "CHO-DXB11",
+  3.0, "nonexpr", "CHO-K1",
+  4.0, "nonexpr", "CHO-DXB11",
+  5.0, "nonexpr", "CHO-K1",
+  6.0, "nonexpr", "CHO-S",
+) %>%
+  ggplot(aes(
+    x = x,
+    y = factor(y,
+      levels = c("nonexpr", "expr"),
+      labels = c("Non-expressed", "Expressed")
+    ),
+    label = label
+  )) +
+  geom_text(size = 4) +
+  # theme_void() +
+  theme(
+    axis.text.y = element_text(size = 14, margin = margin(r = 12)),
+    legend.position = "none"
+  )
+
+(intersect_plot <- ggarrange(intersect_graph, intersect_table,
+  nrow = 2,
+  align = "v",
+  heights = c(.8, .2)
+)
+)
+```
+
+#### Venn Diagrams
+
+
+```{r intersections-venn-diagram}
+plot_venn <- function(hi, low1, low2) {
+  colnums <- case_when(
+    hi == "CHO-K1" ~ c(2, 3, 5),
+    hi == "CHO-DXB11" ~ c(4, 5, 1),
+    hi == "CHO-S" ~ c(6, 3, 1),
+  )
+  patterns <- case_when(
+    hi == "CHO-K1" ~ c("e..", "..n", ".n."),
+    hi == "CHO-S" ~ c(".e.", "..n", "n.."),
+    hi == "CHO-DXB11" ~ c("..e", ".n.", "n..")
+  )
+  venn.diagram(
+    x = get_geneset(expressions_cell_lines, patterns),
+    fill = color_palette[colnums],
+    col = color_palette[colnums],
+    cex = 1.2,
+    cat.cex = 1.2,
+    alpha = .5,
+    category.names = c(hi, low1, low2),
+    filename = NULL,
+    rotation.degree = -60,
+    #            hi low1 low2
+    cat.pos = c(0, 155, -165),
+    cat.dist = c(.05, .05, .07)
+  )
+}
+
+venn_plots <- list(
+  "K1"  = plot_venn("CHO-K1", "CHO-DXB11", "CHO-S"),
+  "S"   = plot_venn("CHO-S", "CHO-DXB11", "CHO-K1"),
+  "DXB" = plot_venn("CHO-DXB11", "CHO-S", "CHO-K1")
+)
+
+# vennDiagrams <- grid.arrange(k1venn, dxbvenn, svenn, nrow = 1)
+venn_plots$all <- arrangeGrob(venn_plots$K1, venn_plots$S, venn_plots$DXB, NULL,
+  nrow = 1, padding = 100, widths = c(0.32, 0.32, 0.32, 0.03)
+)
+# ggsave(here("tmp/plot.png"), vennDiagrams)
+```
+
+
+#### Combined plots
+
+
+```{r combined-plot-intersections}
+(intersect_figure <- ggarrange(intersect_plot,
+  ggarrange(NULL, venn_plots$all, widths = c(.23, .77), nrow = 1),
+  NULL,
+  nrow = 3,
+  heights = c(.6, .38, 0.02)
+)
+)
+```
+
+```{r save-combined-plot}
+saveplot(intersect_figure, h = 6, bg = "white", dpi = 150)
+```
+
+
+### Expressed genes
+
+
+```{r venn-expressed-genes}
+venn_plots$expressed <- local({
+  precursor <- venn.diagram(
+    x = get_geneset(expressions_cell_lines, c("e..", ".e.", "..e")),
+    fill = color_palette[c(2, 4, 6)],
+    col = color_palette[c(2, 4, 6)],
+    alpha = .5,
+    category.names = c("CHO-K1", "CHO-S", "CHO-DXB11"),
+    filename = NULL
+  )
+  ggarrange(NULL, precursor, NULL,
+    nrow = 1, widths = c(0.1, 0.8, 0.1)
+  )
+})
+
+# Only CHO-S
+get_geneset_size(expressions_cell_lines, "[^e]e[^e]")
+# Only CHO-DXB11
+get_geneset_size(expressions_cell_lines, "[^e][^e]e")
+
+saveplot(venn_plots$expressed,
+  w = 4, h = 3, bg = "white", name = "expressed_venn"
+)
+```
+
+```{r custom-upset-plot, echo = FALSE}
+source(here("analysis/upsetplot-fixed.R"))
+```
+
+```{r expressed-upset-plot}
+#| fig.width = 14
+
+upset <- list(
+  "expressed" = list(
+    "comb_matrix" = make_comb_mat(
+      get_geneset(expressions_cell_lines, c("e..", ".e.", "..e")) %>%
+        `names<-`(c("CHO-K1", "CHO-S", "CHO-DXB11"))
+    )
+  ),
+  "not_expressed" = list(
+    "comb_matrix" = make_comb_mat(
+      get_geneset(expressions_cell_lines, c("n..", ".n.", "..n")) %>%
+        `names<-`(c("CHO-K1", "CHO-S", "CHO-DXB11"))
+    )
+  ),
+  "ignored" = list(
+    "comb_matrix" = make_comb_mat(
+      get_geneset(expressions_cell_lines, c("i..", ".i.", "..i")) %>%
+        `names<-`(c("CHO-K1", "CHO-S", "CHO-DXB11"))
+    )
+  ),
+  "params" = list(
+    "top_plot_height" = unit(5, "cm"),
+    "side_plot_width" = unit(4, "cm"),
+    "side_title_gap" = unit(2, "cm")
+  )
+)
+
+comb_size_expressed <- comb_size(upset$expressed$comb_matrix)
+comb_size_nonexpressed <- comb_size(upset$not_expressed$comb_matrix)
+comb_size_ignored <- comb_size(upset$ignored$comb_matrix)
+set_size_expressed <- set_size(upset$expressed$comb_matrix)
+set_size_nonexpressed <- set_size(upset$not_expressed$comb_matrix)
+set_size_ignored <- set_size(upset$ignored$comb_matrix)
+
+upset$expressed$plot <- with(upset$expressed, {
+  UpSettingBug(
+    comb_matrix,
+    pt_size = unit(5, "mm"), lwd = 3,
+    column_names_gp = gpar(fontsize = 15),
+    column_title_gp = gpar(fontsize = 18),
+    set_order = c("CHO-K1", "CHO-S", "CHO-DXB11"),
+    row_names_gp = gpar(fontsize = 14),
+    column_title = "Expressed genes",
+    top_annotation = upset_top_annotation(
+      comb_matrix,
+      height = upset$params$top_plot_height,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_rot = 90,
+      annotation_name_offset = unit(1.8, "cm"),
+      ylim = c(0, 9000),
+      axis_param = list(gp = gpar(fontsize = 12))
+    ),
+    left_annotation = upset_left_annotation(
+      comb_matrix,
+      width = upset$params$side_plot_width,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_offset = upset$params$side_title_gap,
+      annotation_name_rot = 0,
+      annotation_name_side = "bottom",
+      axis_param = list(gp = gpar(fontsize = 12))
+    ),
+    right_annotation = rowAnnotation(
+      labels = anno_text(
+        c("CHO-K1", "CHO-S", "CHO-DXB11"),
+        just = "center", location = 0.5
+      )
+    )
+  )
+})
+
+upset$not_expressed$plot <- with(upset$not_expressed, {
+  UpSettingBug(
+    comb_matrix,
+    pt_size = unit(5, "mm"), lwd = 3,
+    column_names_gp = gpar(fontsize = 15),
+    column_title_gp = gpar(fontsize = 18),
+    set_order = c("CHO-K1", "CHO-S", "CHO-DXB11"),
+    row_names_gp = gpar(fontsize = 14),
+    column_title = "Non-expressed genes",
+    top_annotation = upset_top_annotation(
+      comb_matrix,
+      height = upset$params$top_plot_height,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_rot = 270,
+      annotation_name_side = "right",
+      annotation_name_offset = unit(1.8, "cm"),
+      ylim = c(0, 9000),
+      axis_param = list(side = "right", gp = gpar(fontsize = 12))
+    ),
+    right_annotation = upset_right_annotation(
+      comb_matrix,
+      width = upset$params$side_plot_width,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_offset = upset$params$side_title_gap,
+      annotation_name_rot = 0,
+      annotation_name_side = "bottom",
+      axis_param = list(gp = gpar(fontsize = 12))
+    )
+  )
+})
+
+upset$ignored$plot <- with(upset$ignored, {
+  UpSettingBug(
+    comb_matrix,
+    pt_size = unit(5, "mm"), lwd = 3,
+    column_names_gp = gpar(fontsize = 15),
+    column_title_gp = gpar(fontsize = 18),
+    set_order = c("CHO-K1", "CHO-S", "CHO-DXB11"),
+    row_names_gp = gpar(fontsize = 14),
+    column_title = "Indeterminate expression",
+    top_annotation = upset_top_annotation(
+      comb_matrix,
+      height = upset$params$top_plot_height,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_rot = 270,
+      annotation_name_side = "right",
+      annotation_name_offset = unit(1.8, "cm"),
+      axis_param = list(side = "right", gp = gpar(fontsize = 12))
+    ),
+    right_annotation = upset_right_annotation(
+      comb_matrix,
+      width = upset$params$side_plot_width,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_offset = upset$params$side_title_gap,
+      annotation_name_rot = 0,
+      annotation_name_side = "bottom",
+      axis_param = list(gp = gpar(fontsize = 12))
+    )
+  )
+})
+
+upset_plots_expr <- grid.grabExpr(
+  draw(upset$expressed$plot + upset$not_expressed$plot)
+)
+upset_plot_indet <- grid.grabExpr(
+  draw(upset$ignored$plot)
+)
+```
+
+```{r upset-export}
+png(
+  here(str_glue("plots/{prefix}/upset_plot_ignored.png")),
+  width = 24,
+  height = 12,
+  units = "cm",
+  res = 300,
+  bg = "transparent"
+)
+draw(upset$ignored$plot)
+dev.off()
+
+png(
+  here(str_glue("plots/{prefix}/upset_plots_expressed_nonexpressed.png")),
+  width = 30,
+  height = 12,
+  units = "cm",
+  res = 300,
+  bg = "transparent"
+)
+draw(upset$expressed$plot + upset$not_expressed$plot)
+dev.off()
+```
+
+
+# Stratification of CHO-K1 subsets
+
+CHO-K1 is the most diverse set of samples we have in our analysis. There are
+datasets employing both, rRNA depletion and poly(A) enrichment, and there are
+datasets working with adherent instead of suspension cells.
+
+Before, in the ignored genes upset plot, we saw that the most ignored/variable
+genes are in CHO-K1 but that might just be due to the technical variability we
+see in CHO-K1 more than in other cell lines. This part is dedicated to
+investigating that.
+
+```{r stratify-chok1-subsets}
+subsets <- normalized_counts_SE %>%
+  colData() %>%
+  as.data.frame() %>%
+  select(CellLine, LibraryStrategy) %>%
+  unique()
+
+expressions_subsets <- subsets %>%
+  pmap(function(CellLine, LibraryStrategy) {
+    # samples of the respective subset
+    subset_samples <- normalized_counts_SE %>%
+      colData() %>%
+      as.data.frame() %>%
+      filter(
+        CellLine == {{ CellLine }} & LibraryStrategy == {{ LibraryStrategy }}
+      ) %>%
+      pull(SampleAccession)
+
+    n_samples <- length(subset_samples)
+
+    # Subset bool matrix to only cell line samples
+    is_expressed_subset <- is_expressed[, subset_samples]
+
+    # Fraction of samples in which the gene is expressed
+    subset_expression_fractions <-
+      rowSums(is_expressed_subset) / n_samples
+
+    case_when(
+      subset_expression_fractions > 0.95 ~ "e",
+      subset_expression_fractions < 0.05 ~ "n",
+      TRUE ~ "i"
+    )
+    # Expresed / not expressed genes
+    # genesExpr <- names(clExprFracs)[clExprFracs > 0.95]
+    # genesNoExpr <- names(clExprFracs)[clExprFracs < 0.05]
+    #
+    # return(list(genesExpr = genesExpr, genesNoExpr = genesNoExpr))
+  }) %>%
+  `names<-`(
+    mutate(subsets, subset = paste(CellLine, LibraryStrategy, sep = "_")) %>%
+      pull(subset)
+  ) %>%
+  do.call(cbind, .) %>%
+  `rownames<-`(rownames(is_expressed))
+```
+
+## Results
+
+```{r subsets-diff-expressed}
+tribble(
+  ~high,             ~low,              ~pattern,
+  "CHO-K1_rRNA",     "CHO-K1_PolyA",    "en..",
+  "CHO-K1_rRNA",     "CHO-S_polyA",     "e.n.",
+  "CHO-K1_rRNA",     "CHO-DXB11_rRNA",  "e..n",
+  "CHO-K1_PolyA",    "CHO-K1_rRNA",     "ne..",
+  "CHO-K1_PolyA",    "CHO-S_polyA",     ".en.",
+  "CHO-K1_PolyA",    "CHO-DXB11_rRNA",  ".e.n",
+  "CHO-S_polyA",     "CHO-K1_rRNA",     "n.e.",
+  "CHO-S_polyA",     "CHO-K1_PolyA",    ".ne.",
+  "CHO-S_polyA",     "CHO-DXB11_rRNA",  "..en",
+  "CHO-DXB11_rRNA",  "CHO-K1_rRNA",     "n..e",
+  "CHO-DXB11_rRNA",  "CHO-K1_PolyA",    ".n.e",
+  "CHO-DXB11_rRNA",  "CHO-S_polyA",     "..ne"
+) %>%
+  mutate(n_geneset = get_geneset_size(expressions_subsets, pattern))
+```
+
+```{r rrna-vs-polya-upsetplot}
+#| fig.height = 4,
+#| fig.width = 8
+library_strat_upset_data <- cbind(
+  (expressions_subsets[, 1:2] == "e"),
+  (expressions_subsets[, 1:2] == "i"),
+  (expressions_subsets[, 1:2] == "n")
+) %>%
+  `colnames<-`(c(
+    "CHO-K1_rRNA_expressed", "CHO-K1_polyA_expressed",
+    "CHO-K1_rRNA_ignored", "CHO-K1_polyA_ignored",
+    "CHO-K1_rRNA_non-expressed", "CHO-K1_polyA_non-expressed"
+  )) %>%
+  as.data.frame()
+
+n_genes_libstrats <- colSums(library_strat_upset_data)
+n_diff_libstrats <- c(
+  n_genes_libstrats[2] - n_genes_libstrats[1],
+  n_genes_libstrats[4] - n_genes_libstrats[3],
+  n_genes_libstrats[5] - n_genes_libstrats[6]
+)
+
+(library_strat_upset_plot <- upset(
+  library_strat_upset_data,
+  rev(colnames(library_strat_upset_data)),
+  sort_sets = FALSE
+)
+)
+
+saveplot(library_strat_upset_plot)
+```
+
+
+### Upset plot
+
+
+```{r subsets-upset, eval = FALSE}
+if (FALSE) {
+upset_subset <- list(
+  "expressed" = list(
+    "comb_matrix" = make_comb_mat(
+      get_geneset(expressions_subsets, c("e...", ".e..", "..e.", "...e")) %>%
+    `names<-`(c("CHO-K1_rRNA", "CHO-K1_PolyA", "CHO-S_polyA", "CHO-DXB11_rRNA"))
+    )
+  ),
+  "not_expressed" = list(
+    "comb_matrix" = make_comb_mat(
+      get_geneset(expressions_subsets, c("n...", ".n..", "..n.", "...n")) %>%
+    `names<-`(c("CHO-K1_rRNA", "CHO-K1_PolyA", "CHO-S_polyA", "CHO-DXB11_rRNA"))
+    )
+  ),
+  "ignored" = list(
+    "comb_matrix" = make_comb_mat(
+      get_geneset(expressions_subsets, c("i...", ".i..", "..i.", "...i")) %>%
+    `names<-`(c("CHO-K1_rRNA", "CHO-K1_PolyA", "CHO-S_polyA", "CHO-DXB11_rRNA"))
+    )
+  ),
+  "params" = list(
+    "top_plot_height" = unit(5, "cm"),
+    "side_plot_width" = unit(4, "cm"),
+    "side_title_gap" = unit(2, "cm")
+  )
+)
+
+upset_subset$expressed$plot <- with(upset$expressed, {
+  UpSettingBug(
+    comb_matrix,
+    pt_size = unit(5, "mm"), lwd = 3,
+    column_names_gp = gpar(fontsize = 15),
+    column_title_gp = gpar(fontsize = 18),
+    set_order = c("CHO-K1_rRNA", "CHO-K1_PolyA", "CHO-S_polyA", "CHO-DXB11_rRNA"),
+    row_names_gp = gpar(fontsize = 14),
+    column_title = "Expressed genes",
+    top_annotation = upset_top_annotation(
+      comb_matrix,
+      height = upset$params$top_plot_height,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_rot = 90,
+      annotation_name_offset = unit(1.8, "cm"),
+      ylim = c(0, 9000),
+      axis_param = list(gp = gpar(fontsize = 12))
+    ),
+    left_annotation = upset_left_annotation(
+      comb_matrix,
+      width = upset$params$side_plot_width,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_offset = upset$params$side_title_gap,
+      annotation_name_rot = 0,
+      annotation_name_side = "bottom",
+      axis_param = list(gp = gpar(fontsize = 12))
+    ),
+    right_annotation = rowAnnotation(
+      labels = anno_text(
+        c("CHO-K1 rRNA", "CHO-K1 polyA", "CHO-S", "CHO-DXB11"),
+        just = "center", location = 0.5
+      )
+    )
+  )
+})
+
+upset_subset$not_expressed$plot <- with(upset$not_expressed, {
+  UpSettingBug(
+    comb_matrix,
+    pt_size = unit(5, "mm"), lwd = 3,
+    column_names_gp = gpar(fontsize = 15),
+    column_title_gp = gpar(fontsize = 18),
+    set_order = c("CHO-K1_rRNA", "CHO-K1_PolyA", "CHO-S_polyA", "CHO-DXB11_rRNA"),
+    row_names_gp = gpar(fontsize = 14),
+    column_title = "Not/low expressed genes",
+    top_annotation = upset_top_annotation(
+      comb_matrix,
+      height = upset$params$top_plot_height,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_rot = 270,
+      annotation_name_side = "right",
+      annotation_name_offset = unit(1.8, "cm"),
+      ylim = c(0, 9000),
+      axis_param = list(side = "right", gp = gpar(fontsize = 12))
+    ),
+    right_annotation = upset_right_annotation(
+      comb_matrix,
+      width = upset$params$side_plot_width,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_offset = upset$params$side_title_gap,
+      annotation_name_rot = 0,
+      annotation_name_side = "bottom",
+      axis_param = list(gp = gpar(fontsize = 12))
+    )
+  )
+})
+
+upset_subset$ignored$plot <- with(upset$ignored, {
+  UpSettingBug(
+    comb_matrix,
+    pt_size = unit(5, "mm"), lwd = 3,
+    column_names_gp = gpar(fontsize = 15),
+    column_title_gp = gpar(fontsize = 18),
+    set_order = c("CHO-K1_rRNA", "CHO-K1_PolyA", "CHO-S_polyA", "CHO-DXB11_rRNA"),
+    comb_order = order(comb_size(comb_matrix), decreasing = TRUE),
+    row_names_gp = gpar(fontsize = 14),
+    column_title = "Ignored",
+    top_annotation = upset_top_annotation(
+      comb_matrix,
+      height = upset$params$top_plot_height,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_rot = 270,
+      annotation_name_side = "right",
+      annotation_name_offset = unit(1.8, "cm"),
+      axis_param = list(side = "right", gp = gpar(fontsize = 12))
+    ),
+    right_annotation = upset_right_annotation(
+      comb_matrix,
+      width = upset$params$side_plot_width,
+      add_numbers = TRUE,
+      numbers_gp = gpar(fontsize = 12),
+      annotation_name_gp = gpar(fontsize = 16),
+      annotation_name_offset = upset$params$side_title_gap,
+      annotation_name_rot = 0,
+      annotation_name_side = "bottom",
+      axis_param = list(gp = gpar(fontsize = 12))
+    )
+  )
+})
+
+draw(upset_subset$expressed$plot)
+
+draw(upset_subset$not_expressed$plot)
+
+draw(upset_subset$ignored$plot)
+}
+```
+
+# Export gene sets for Chromatin States analyses
+
+
+```{r chromatin-states-export}
+local({
+  k1_expressed <- get_geneset(expressions_cell_lines, "e..")
+  k1_notexpressed <- get_geneset(expressions_cell_lines, "n..")
+  k1_ignored <- get_geneset(expressions_cell_lines, "i..")
+
+  expr_file <- file(
+    here("results/chromatin-states/annotation/expressed-genes.txt"),
+    open = "w"
+  )
+  writeLines(k1_expressed, con = expr_file, sep = "\n")
+  close(expr_file)
+
+  ignored_file <- file(
+    here("results/chromatin-states/annotation/ignored-genes.txt"),
+    open = "w"
+  )
+  writeLines(k1_ignored, con = ignored_file, sep = "\n")
+  close(ignored_file)
+
+  notexpr_file <- file(
+    here("results/chromatin-states/annotation/not-expressed-genes.txt"),
+    open = "w"
+  )
+  writeLines(k1_notexpressed, con = notexpr_file, sep = "\n")
+  close(notexpr_file)
+})
+```
+
+
+# Session info
+
+```{r session-info}
+save(
+  cell_line_fractions, expression_threshold,
+  comb_size_ignored, comb_size_expressed, comb_size_nonexpressed,
+  set_size_expressed, set_size_nonexpressed, set_size_ignored,
+  intersection_sizes, n_diff_expr, n_diff_libstrats,
+  file = here(str_glue("results/paper/{prefix}.RData"))
+)
+
+save.image(here("results/R/04_expressed-genes/environment.RData"))
+
+session_info()
+```
+

@@ -1,0 +1,28 @@
+runs_csv: "resources/all-runs_experimental_condition.csv"
+assembly: "GCF_003668045.3_CriGri-PICRH-1.0"
+ncbi_datasets:
+  - ERP122753
+  - SRP066848
+  - SRP069883 
+  - SRP111368
+  - SRP159459
+  - SRP234382
+  - SRP246348
+  - SRP324587
+adapters:
+  ERP122753: "TruSeq3-PE-2.fa"
+  SRP066848: "TruSeq3-PE-2.fa"
+  SRP069883: "TruSeq3-PE-2.fa" 
+  SRP111368: "TruSeq3-PE-2.fa"
+  SRP159459: "TruSeq3-PE-2.fa"
+  SRP234382: "TruSeq3-PE-2.fa"
+  SRP246348: "TruSeq3-PE-2.fa"
+  SRP281874: "TruSeq3-PE-2.fa"
+  SRP324587: "TruSeq3-PE-2.fa"
+  INH01_Papez: "TruSeq3-PE-2.fa"
+  INH02_NovakProducers: "INH02_adapters.fa"
+  INH03_WeingunySubclones: "INH03_adapters.fa"
+  INH04_WeingunySubclonability: "INH03_adapters.fa"
+  INH05_Novak2019Clones: "TruSeq3-SE.fa"
+  INH06_Ruckerbauer: "TruSeq3-SE.fa"
+  INH07_NovakTempShift: "INH07_adapters.fa"

@@ -1,0 +1,266 @@
+---
+title: Normalization of raw gene counts
+date: "`r Sys.Date()`"
+---
+
+
+# Description
+
+GeTMM normalization of raw gene counts for downstream analyses.
+
+
+# Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(edgeR)
+  library(ggridges)
+  library(ggpubr)
+  library(RColorBrewer)
+  library(SummarizedExperiment)
+})
+```
+
+```{r params}
+prefix <- "02_normalization"
+```
+
+# Load data
+
+Load the SummarizedExperiment object of the coding gene counts produced in
+`01_data-preparation`.
+
+```{r load-raw-counts}
+coding_counts_SE <- readRDS(
+  here("results/R/01_data-preparation/coding_counts_SE.rds")
+)
+```
+
+# Normalization
+
+
+After a lot of trial-and-error and literature/internet search I finally found
+a viable appraoch.
+It's called **GeTMM** and stands for Gene-length corrected Trimmed Means of
+M-values.
+The approach consists of three steps:
+
+1. Gene-length correction by dividing the counts by the gene length in
+   kilobases.
+   This yields the reads-per-kilobase (**RPK**) measure.
+2. **TMM-normalization** that is implemented in edgeR.
+   Aims to normalize the datasets using one as as reference.
+   It then trims away extreme genes and only calculates a normalization factor
+   using genes that are supposed to be non-differentially expressed between
+   datasets.
+3. Counts-per-million (**CPM**) calculation using the library size and the
+   normalization factor.
+
+
+
+## Get gene length for TMM normalization
+
+
+In order to correct for the gene length we need to know the gene length.
+This can be found in the output of the STAR aligner.
+We can use any sample for this since all samples used the same annotation.
+
+
+```{r get-gene-length}
+(gene_lengths <- read_tsv(
+  here("results/counts/INH01_Papez/INH010100_counts.txt"),
+  skip = 1
+) %>%
+  dplyr::select(Geneid, Length) %>%
+  filter(Geneid %in% rownames(coding_counts_SE))
+)
+
+saveobj(gene_lengths)
+```
+
+## Reads-per-kilobase
+
+
+We use a gene-length corrected version of TMM normalization.
+
+We compute the Reads Per Kilobase of the gene length (RPK).
+
+Then, we'll convert the SummarizedExperiment (SE) object as DGEList object,
+which is what edgeR will expect from us for the TMM normalization.
+
+
+```{r rpk}
+# Divide read counts by gene length in kilobases.
+assays(coding_counts_SE)$counts <-
+  assays(coding_counts_SE)$raw_counts / (gene_lengths$Length / 1000)
+
+str(assays(coding_counts_SE)$counts)
+
+# Convert SummarizedExperiment to DGEList object
+coding_counts_DGE <- SE2DGEList(coding_counts_SE)
+```
+
+
+## TMM normalization
+
+
+These RPK values are now fed into the edgeR's TMM normalzation algorithm.
+Returned as DGEList object again.
+
+```{r tmm-normalization}
+normalized_counts_DGE <- calcNormFactors(coding_counts_DGE)
+
+head(normalized_counts_DGE$samples$lib.size)
+head(normalized_counts_DGE$samples$norm.factors)
+```
+
+
+## (Log2) CPM values
+
+
+Get the TMM-normalized log Counts Per Million (CPM).
+
+```{r cpm-calculation}
+# Matrix of normalized CPM values
+normalized_cpm <- cpm(normalized_counts_DGE)
+
+# Matrix of normalized logCPM values
+normalized_logcpm <- cpm(normalized_counts_DGE, log = TRUE)
+```
+
+We'll finally convert all of that into a SummarizedExperiment again since this
+is the most versatile and nice output to work with. This is also the main output
+of the entire step here!
+
+```{r save-cpms}
+# Convert to SummarizedExperiment and include metadata again
+(normalized_counts_SE <- SummarizedExperiment(
+  assays = list(
+    counts            = assays(coding_counts_SE)$raw_counts,
+    rpk               = normalized_counts_DGE$counts,
+    normalized_cpm    = normalized_cpm,
+    normalized_logcpm = normalized_logcpm
+  ),
+  colData = colData(coding_counts_SE)
+)
+)
+
+saveobj(normalized_counts_SE)
+```
+
+# Visualize normalization results
+
+
+## Distribution off TMM-CPM values
+
+We are having a look at the normalized expression values.
+
+
+### Ridge Plot
+
+First as Ridge Plots for a random selection of samples.
+
+```{r random-samples}
+random_samples <- sample(colnames(normalized_logcpm), 20)
+summary(normalized_logcpm[, random_samples])
+```
+
+
+```{r logcpm-ridge-plot}
+ridge_plot_logcpm <- normalized_logcpm %>%
+  `[`(, random_samples) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(cols = c(-gene), names_to = "sample", values_to = "cpm") %>%
+  ggplot(aes(x = cpm, y = sample)) +
+  geom_density_ridges() +
+  scale_x_continuous(breaks = c(-5, 0, 5, 10)) +
+  labs(x = expression("TMM-normalized log"[2] * "(CPM')"))
+
+ridge_plot_logcpm
+```
+
+```{r save-logcpm-ridgeplot}
+saveplot(ridge_plot_logcpm)
+saveobj(ridge_plot_logcpm)
+```
+
+
+### Histogram
+
+Now we're going to look at specific examples of samples that have a very low
+library size, i.e. low/shallow sequencing depth versus samples that are
+highly/deeply sequenced (high library size).
+
+
+```{r logcpm-histogram}
+# From Hefzi dataset -- low sequencing depth
+low_depth_sample <- "SRS1322694"
+low_depth_size <- normalized_counts_SE$LibrarySize[low_depth_sample]
+low_depth_logcpm <- normalized_logcpm[, low_depth_sample]
+
+# From Novak02 -- intermediary depth
+middle_depth_sample <- "INH070300"
+middle_depth_size <- normalized_counts_SE$LibrarySize[middle_depth_sample]
+middle_depth_logcpm <- normalized_logcpm[, middle_depth_sample]
+
+# From Barzadd -- high depth
+high_depth_sample <- "SRS9236358"
+high_depth_size <- normalized_counts_SE$LibrarySize[high_depth_sample]
+high_depth_logcpm <- normalized_logcpm[, high_depth_sample]
+
+# Tidy dataframe of three samples' logCPM values with varying sequencing depths
+different_depths_samples <- rbind(
+    tibble(sample = low_depth_sample, logcpm = low_depth_logcpm),
+    tibble(sample = middle_depth_sample, logcpm = middle_depth_logcpm),
+    tibble(sample = high_depth_sample, logcpm = high_depth_logcpm)
+  ) %>%
+  mutate(
+    sample = factor(
+      sample,
+      levels = c("SRS1322694", "INH070300", "SRS9236358")
+    )
+  )
+
+(different_depths_histogram <-
+  gghistogram(different_depths_samples,
+    x           = "logcpm",
+    color       = "sample",
+    fill        = "sample",
+    alpha       = 0.2,
+    palette     = brewer.pal(6, "YlOrRd")[4:6],
+    bins        = 40,
+    add_density = TRUE
+  ) +
+  theme(
+    legend.position = "none",
+    plot.background = element_blank(),
+    panel.background = element_blank()
+  )
+)
+```
+
+```{r save-logcpm-histogram}
+saveobj(different_depths_histogram)
+saveplot(different_depths_histogram, h = 5)
+```
+
+
+
+# Session Info
+
+```{r session-info}
+save(
+  low_depth_size, middle_depth_size, high_depth_size,
+  file = here(str_glue("results/paper/{prefix}.RData"))
+)
+
+save.image(
+here(str_glue("results/R/{prefix}/environment.RData"))
+)
+
+session_info()
+```
+

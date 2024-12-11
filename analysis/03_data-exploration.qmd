@@ -1,0 +1,685 @@
+---
+title: Explorative Data Analysis
+date: "`r Sys.Date()`"
+---
+
+# Description
+
+# Setup
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(here)
+  library(tidyverse)
+  library(ggh4x)
+  library(ggridges)
+  library(SummarizedExperiment)
+  library(DESeq2)
+  library(edgeR)
+  library(RColorBrewer)
+  library(ggforce)
+  library(ggpubr)
+})
+```
+
+```{r params}
+prefix <- "03_data-exploration"
+```
+
+
+## Load data
+
+
+```{r load-summarized-experiment}
+normalized_counts_SE <- readRDS(
+  here("results/R/02_normalization/normalized_counts_SE.rds")
+)
+
+normalized_counts_SE
+# Format the colData dataframe properly!
+```
+
+Additionally to loading the data, I also need to include the information of the
+strandedness of each RNA-seq samples. This was created in the Snakemake workflow
+before the quantification step with featureCounts.
+
+```{r add-stradedness-information}
+strandedness <- xfun::cache_rds({
+  filenames <- str_glue(
+    here("results/counts/{normalized_counts_SE$DatasetReadable}/",
+      "{normalized_counts_SE$SampleAccession}_strandedness.txt")
+  ) %>%
+    as.character()
+#
+  strandedness <- c()
+  for (f in filenames) {
+    strandedness <- c(strandedness, read_lines(f, skip = 1, n_max = 1))
+  }
+  strandedness
+},
+  file = "strandedness",
+  dir = here("analysis/cache/")
+)
+
+normalized_counts_SE$Strandedness <- colData(normalized_counts_SE) %>%
+  as.data.frame() %>%
+  mutate(Strandedness = strandedness) %>%
+  pull(Strandedness)
+```
+
+
+
+```{r plot-settings}
+datasets <- str_sort(unique(normalized_counts_SE$DatasetName))
+
+dataset_colors <- colorRampPalette(brewer.pal(name = "Set1", n = 8))(15) %>%
+  `names<-`(datasets)
+
+libstrat_shapes <- with(colData(normalized_counts_SE), {
+  cellline_libstrat <- interaction(CellLine, LibraryStrategy) %>% droplevels()
+  case_when(
+    levels(cellline_libstrat) == "CHO-K1.PolyA" ~ 23,
+    levels(cellline_libstrat) == "CHO-K1.rRNA" ~ 22,
+    levels(cellline_libstrat) == "CHO-S.PolyA" ~ 24,
+    levels(cellline_libstrat) == "CHO-DXB11.rRNA" ~ 21
+  ) %>%
+  `names<-`(levels(cellline_libstrat))
+})
+```
+
+
+## Low count filtering
+
+One of the first critical steps with RNA-Seq count data is the filtering of
+lowly transcribed genes since they are relatively indistinguishable from noise.
+
+The filtering will be implemented according to Chen et al. (2016). In this
+publication they discuss a theoretically best approach to filtering of genes for
+differential gene expression. It considers sequencing depths as well as the
+number of samples in different the groups of samples under investigation.
+
+Filtering of lowly-expressed genes is needed in consideration of two factors:
+
+- **Biologically**, genes must have a minimum expression before it is likely
+  that they are translated into a protein and have any sort of biological
+  relevance.
+- **Statistically**, genes with low counts don't carry a lot of information for
+  differential gene expression and are generally very noisy.
+
+Chen et al. describe a filtering approach for each gene $g$ which can be
+summarized roughly as
+$$
+|\{ s \in S : \text{CPM}_{gs} > k \}| > n
+$$
+with $S$ being the set of all samples, $\text{CPM}_{gs}$ the CPM values for
+gene $g$ in sample $s$, $k$ the CPM threshold and $n$ the sample threshold.
+
+- **CPM threshold $k$**  
+  It is recommended to set the CPM threshold to about $10 / L$ gene counts,
+  with $L$ being the minimum library size in millions.
+- **Sample threshold $n$**  
+  It is recommended to the set sample threshold to the smallest sample group
+  size.
+
+
+### Setting $k$
+
+First, we want an impression of the library sizes/sequencing depth of the
+samples.
+
+```{r filtering-setting-k}
+library_sizes_stats <- summary(colData(normalized_counts_SE)$LibrarySize)
+library_sizes_stats <- c(
+  library_sizes_stats,
+  sd = sd(colData(normalized_counts_SE)$LibrarySize)
+)
+
+(library_sizes_plot <- colData(normalized_counts_SE) %>%
+  as.data.frame() %>%
+  mutate(
+    LibraryStrategy = as.character(LibraryStrategy),
+    CellLine = factor(CellLine, levels = c("CHO-S", "CHO-K1", "CHO-DXB11"))
+  ) %>%
+  ggplot(aes(
+      x = interaction(DatasetAbbrev, LibraryStrategy, CellLine),
+      y = LibrarySize,
+      fill = DatasetName,
+      shape = interaction(CellLine, LibraryStrategy)
+    )
+  ) +
+  geom_boxplot(alpha = 0.3) +
+  geom_jitter(position = position_jitter(width = .1)) +
+  scale_fill_manual(values = dataset_colors) +
+  scale_shape_manual(values = libstrat_shapes) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.05)),
+    limits = c(0, 1.5e8),
+    breaks = scales::breaks_extended(7),
+    labels = scales::label_number(scale_cut = scales::cut_short_scale())
+  ) +
+  guides(x = "axis_nested") +
+  labs(y = "Library size") +
+  theme_bw() +
+  theme(
+    axis.text = element_text(size = 9),
+    axis.text.x = element_text(size = 11, hjust = 0.5, vjust = 1),
+    axis.title.x = element_blank(),
+    ggh4x.axis.nestline.x = element_line(linewidth = 1),
+    ggh4x.axis.nesttext.x = element_text(
+      color = "black", angle = 0, size = 9, hjust = 0.5, vjust = 0.5
+    ),
+    legend.position = "none",
+    legend.direction = "horizontal",
+    legend.title = element_blank()
+  )
+)
+
+saveplot(library_sizes_plot)
+```
+
+
+Ridge plot showing the distribution of the raw (unnormalized) counts.
+
+```{r raw-counts-ridge}
+sample_subset <-
+  assays(normalized_counts_SE)$counts %>%
+  `[`(, sample(ncol(normalized_counts_SE), size = 20))
+
+(raw_counts_ridges <- sample_subset %>%
+  `+`(1) %>%
+  as.data.frame() %>%
+  rownames_to_column("gene") %>%
+  pivot_longer(cols = c(-gene), names_to = "sample", values_to = "counts") %>%
+  ggplot(aes(x = counts, y = sample)) +
+  geom_density_ridges() +
+  scale_x_log10(
+    breaks = c(10^(0:6)),
+    labels = scales::label_log()
+  ) +
+  labs(x = "Counts + 1")
+)
+```
+
+
+```{r cpm-ridge, eval = FALSE, include = FALSE}
+if (FALSE) {
+  cpmRidgePlot <- cpm(sample_subset, log = TRUE, prior.count = 1) %>%
+    as.data.frame() %>%
+    rownames_to_column("gene") %>%
+    pivot_longer(cols = c(-gene), names_to = "sample", values_to = "cpm") %>%
+    ggplot(aes(x = cpm, y = sample)) +
+  geom_density_ridges() +
+  scale_x_continuous(breaks = c(-5, 0, 5, 10)) +
+  labs(x = expression("log"[2] * "(CPM')"))
+}
+```
+
+Some datasets show a very low sequencing depth (library size) which should be
+assessed critically. For now, I would define $L$ as 20, corrensponding to a
+library size of $20 \times 10^6$. That would yield
+$$
+k = \frac{10}{20} = 0.5
+$$
+
+```{r set-k}
+k <- 0.5
+```
+
+### Setting $n$
+
+Later, we want to analyse the gene expression using various methods with
+interest in a couple of biological questions. I think, it would makes sense
+to count the samples that belong to the various groups, according to biological
+features of interest.
+
+```{r, results = 'asis'}
+colData(normalized_counts_SE) %>%
+  as.data.frame() %>%
+  group_by(CellLine, Producer, DatasetAccession) %>%
+  summarize(n = n()) %>%
+  group_by(CellLine, Producer) %>%
+  summarize(n_datasets = n(), n = sum(n)) %>%
+  { .$n ->> group_sizes; . } %>%
+  knitr::kable()
+```
+
+```{r, results = 'asis'}
+colData(normalized_counts_SE) %>%
+  as.data.frame() %>%
+  group_by(DatasetReadable) %>%
+  summarize(n = n()) %>%
+  knitr::kable()
+```
+
+For now, I set $n$ to 20 (more or less arbitrary) and see how that's working.
+
+```{r set-n}
+# n <- min(groupSizes)
+n <- 20
+```
+
+
+### Filter
+
+
+```{r filter-genes}
+is_expressed <- rowSums(assays(normalized_counts_SE)$normalized_cpm > k) > n
+table(is_expressed)
+
+(exploration_counts_SE <- normalized_counts_SE[is_expressed, ])
+
+saveobj(exploration_counts_SE)
+```
+
+```{r exploration-numbers-for-manuscript}
+n_genes_exploration <- nrow(exploration_counts_SE)
+```
+
+We end up with `r n_genes_exploration` genes.
+
+
+# GeTMM logCPM
+
+```{r getmm-rlog}
+exploration_logcpm <- assays(exploration_counts_SE)$normalized_logcpm
+
+mean_sd_plot_logcpm <- vsn::meanSdPlot(
+  exploration_logcpm,
+  bins = 100,
+  rank = TRUE,
+  # rank = FALSE,
+  plot = FALSE
+)$gg
+```
+
+
+# Transformations
+
+Log transformation is needed to make the data homoskdastic, which is a
+requirement of exploratory methods such as PCA and clustering. Normally, we
+would use the VST (variance-stabilzing transformation) but since the
+regularlized logarithm transformation from DESeq2 is recommended in the case
+of highly variable sequencing depths we have to use the computationally more
+intense rlog approach.
+
+```{r rlog-transformation}
+# DESeqDataSet uses the "counts" assay
+exploration_counts_dds <- DESeqDataSet(exploration_counts_SE, design = ~1)
+exploration_counts_dds <- xfun::cache_rds({
+  DESeq(exploration_counts_dds)
+},
+  file = "exploration_countds_dds",
+  dir = here("analysis/cache/"),
+  hash = list(exploration_counts_SE)
+)
+
+# DESeqTransform object
+exploration_counts_vst <- xfun::cache_rds({
+  vst(exploration_counts_dds, blind = TRUE)
+},
+  file = "exploration_counts_vst",
+  dir = here("analysis/cache/"),
+  hash = list(exploration_counts_dds)
+)
+
+exploration_counts_rlog <- xfun::cache_rds({
+  rlog(exploration_counts_dds)
+},
+  file = "exploration_counts_rlog",
+  dir = here("analysis/cache/"),
+  hash = list(exploration_counts_dds)
+)
+
+saveobj(exploration_counts_vst)
+saveobj(exploration_counts_rlog)
+```
+
+
+```{r mean-sd-plot}
+plotMeanSD <- vsn::meanSdPlot(assays(exploration_counts_SE)$counts,
+  bins = 100,
+  rank = TRUE,
+  plot = FALSE
+)
+(plotMeanSD <- plotMeanSD$gg +
+  ylim(c(0, 3e3)) +
+  xlim(c(0, 1.2e4))
+)
+
+saveplot(plotMeanSD, h = 8)
+```
+
+With VST we end up with.
+
+```{r mean-sd-vst-plot}
+plotMeanSDVST <- vsn::meanSdPlot(assay(exploration_counts_vst),
+  bins = 100,
+  rank = TRUE
+)$gg
+
+saveplot(plotMeanSDVST, h = 8)
+```
+
+With rlog we end up with.
+
+```{r mean-sd-rlog-plot}
+plotMeanSD_rlog <- vsn::meanSdPlot(assay(exploration_counts_rlog),
+  bins = 100,
+  rank = TRUE
+)$gg
+
+saveplot(plotMeanSD_rlog, h = 8)
+```
+
+
+```{r compare-mean-sds}
+#| fig.height = 3
+
+(mean_sd_plot_all <- ggarrange(
+  mean_sd_plot_logcpm,
+  plotMeanSD_rlog,
+  plotMeanSDVST,
+  nrow = 1,
+  labels = c("GeTMM logCPM", "rlog", "VST"),
+  common.legend = TRUE
+)
+)
+
+saveplot(mean_sd_plot_all, w = 7, h = 3)
+```
+
+The unregularized log over-inflates the standard deviation which is problematic.
+That's why VST and rlog exist in DESeq2.
+
+
+# Utility Functions
+
+## Dimensionality reduction
+
+```{r utils-mds}
+perform_mds <- function(
+  transformed_counts,
+  method = c("PCA", "PCoA")
+) {
+  if (method == "PCA") {
+    data <- plotPCA(
+      transformed_counts,
+      intgroup = c("CellLine", "DatasetName", "LibraryStrategy",
+        "Producer", "DatasetAbbrev"),
+      returnData = TRUE
+    ) %>%
+      dplyr::rename(component1 = "PC1", component2 = "PC2")
+
+  } else if (method == "PCoA") {
+    pcoa_results <- plotMDS(
+      transformed_counts,
+      top = 500,
+      gene.selection = "pairwise",
+      pch = 21
+    )
+    data <- colData(exploration_counts_SE) %>%
+      as.data.frame() %>%
+      mutate(component1 = pcoa_results$x, component2 = pcoa_results$y)
+    attr(data, 'percentVar') <- pcoa_results$var.explained[1:2]
+    data
+  }
+}
+```
+
+# Plot MDS
+
+```{r mds-plot-function}
+make_mds_plot <- function(mds_data,
+                          x_lim = c(-50, 35),
+                          y_lim = c(-30, 30),
+                          axis_labels = "PC",
+                          coord_fixed = TRUE,
+                          point_size = 2.5,
+                          stroke_size = 0.5) {
+
+  legend_shapes <- mds_data %>%
+    mutate(shape = case_when(
+      CellLine == "CHO-K1" & LibraryStrategy == "rRNA" ~ libstrat_shapes["CHO-K1.rRNA"],
+      CellLine == "CHO-K1" & LibraryStrategy == "PolyA" ~ libstrat_shapes["CHO-K1.PolyA"],
+      CellLine == "CHO-S" & LibraryStrategy == "PolyA" ~ libstrat_shapes["CHO-S.PolyA"],
+      CellLine == "CHO-DXB11" & LibraryStrategy == "rRNA" ~ libstrat_shapes["CHO-DXB11.rRNA"]
+    )) %>%
+    select(DatasetName, shape) %>%
+    unique() %>%
+    mutate(lowercase = tolower(DatasetName)) %>%
+    arrange(lowercase) %>%
+    pull(shape, name = DatasetName)
+
+  percent_variance <- round(attr(mds_data, "percentVar") * 100, 2)
+
+  # label_pos <- mds_data %>%
+  #   group_by(DatasetName) %>%
+  #   summarize(
+  #     x_mean = mean(component1),
+  #     y_mean = mean(component2)
+  #   ) %>%
+  #   right_join(mds_data)
+
+  mds_plot <- mds_data %>%
+    ggplot(
+      aes(x = component1, y = component2,
+        shape = interaction(CellLine, LibraryStrategy),
+        fill = DatasetName
+      )
+    ) +
+  geom_mark_hull(
+    aes(label = DatasetAbbrev
+      # color = DatasetName
+      # x0 = rep(10, 293),
+      # y0 = rep(10, 293)
+    ),
+    alpha = .2,
+    linewidth = 0.3,
+    # color = NA,
+    concavity = 30,
+    expand = unit(2.5, "mm"),
+    label.fontsize = 7,
+    label.margin = margin(0.1, 0, 0, 0, "mm"),
+    label.buffer = unit(0.1, "mm"),
+    label.minwidth = unit(0, "mm"),
+    label.width = NULL,
+    label.lineheight = 1,
+    con.type = "straight",
+    con.size = 0.3,
+    # con.colour = dataset_colors,
+    con.cap = 0
+  ) +
+  geom_point(size = point_size, alpha = 0.7) +
+  scale_shape_manual(values = libstrat_shapes) +
+  scale_fill_manual(values = dataset_colors) +
+  scale_color_manual(values = dataset_colors) +
+  lims(x = x_lim, y = y_lim) +
+  labs(
+    x = paste0(axis_labels, "1: ", percent_variance[1], "% variance"),
+    y = paste0(axis_labels, "2: ", percent_variance[2], "% variance"),
+    fill = "Dataset",
+    shape = "Cell line/Library"
+  ) +
+  guides(
+    shape = guide_legend(
+      override.aes = list(size = 3),
+      nrow = 2,
+      ncol = 2
+    ),
+    fill = guide_legend(
+      override.aes = list(shape = legend_shapes, size = 3),
+      nrow = 5
+    )
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.box = "vertical",
+    legend.key.size = unit(7, "mm"),
+    legend.text = element_text(size = 9),
+    legend.title = element_text(size = 12, face = "bold"),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 12)
+  )
+
+  if (coord_fixed) {
+    mds_plot <- mds_plot + coord_fixed()
+  }
+
+  mds_plot
+}
+```
+
+
+# Principal Component Analysis
+
+Principal component analysis is done with different transformations: VST, rlog
+and GeTMM with logCPM.
+
+VST is most often applied and fast while regularized log transformation is
+recommended for higher sample sizes according to the DESeq2 authors. Both
+methods deal with over inflation of variance after log2 transformation.
+
+GeTMM is a more sophisticated normalization but can't be transformed with either
+of those two. Therefore, here I'll only use regular log transformation.
+
+## From GeTMM logCPM
+
+```{r pca-getmm}
+pca_data_logcpm <- perform_mds(
+  DESeqTransform(
+    SummarizedExperiment(
+      exploration_logcpm,
+      colData = colData(exploration_counts_SE),
+    )
+  ),
+  method = "PCA"
+)
+```
+
+
+## From VST
+
+Conducting a PCA is seamlessly possible in standard package for differential
+gene expression.
+
+```{r pca}
+pca_data_vst <- perform_mds(exploration_counts_vst, method = "PCA")
+
+```
+
+The dataset by Orellana et al. (yeah... that one) has separated samples in the
+PCA. I would like to know which exact samples those are.
+```{r orellana-invsetigations}
+pca_data_vst %>%
+  as.data.frame() %>%
+  filter(DatasetName == "Orellana") %>%
+  select(component1, component2) %>%
+  bind_cols({
+    colData(normalized_counts_SE) %>%
+      as.data.frame() %>%
+      filter(DatasetName == "Orellana") %>%
+      select(Strandedness, FullSampleName)
+  })
+```
+
+## From rlog
+
+
+```{r pca-rlog}
+pca_data_rlog <- perform_mds(exploration_counts_rlog, method = "PCA")
+```
+
+
+## PCA plots
+
+```{r plot-pca}
+#| fig.dim = c(10, 6)
+
+pca_plot_vst <- make_mds_plot(pca_data_vst, coord_fixed = FALSE)
+pca_plot_logcpm <- make_mds_plot(pca_data_logcpm,
+  x_lim = c(-90, 65),
+  y_lim = c(-60, 60)
+)
+pca_plot_rlog <- make_mds_plot(pca_data_rlog,
+  x_lim = c(-50, 50),
+  y_lim = c(-60, 30)
+)
+
+percent_variance <- round(attr(pca_data_vst, "percentVar") * 100, 2)
+
+(pca_plot_arranged <- ggarrange(pca_plot_logcpm, pca_plot_vst, pca_plot_rlog,
+  nrow = 1,
+  labels = c("GeTMM logCPM", "VST"),
+  common.legend = TRUE
+)
+)
+```
+
+
+
+```{r save-pca-plot}
+saveplot(pca_plot_vst, h = 7)
+saveplot(pca_plot_arranged, w = 10, h = 6)
+```
+
+In the PCA we see that samples that are the same library strategy and cell line
+overlap strongly and otherwise the groups of samples are quite distinguished.
+The most variance is explained by the different cell lines.
+Clearly, CHO-K1/CHO-DXB11 and CHO-S are well separated.
+The two CHO-DXB11 datasets are not clustering together.
+In CHO-K1, we have both library strategies and we see that this makes a big
+difference.
+Additionally, we see the adherent CHO-K1 studies separating form the rest of the
+CHO-K1 with polyA enrichment.
+
+
+
+# Principal Coordinate Analysis (PCoA)
+
+
+```{r get-data-for-mds}
+normalized_logcpm <- assays(exploration_counts_SE)$normalized_logcpm
+
+mds_data <- plotMDS(normalized_logcpm,
+  top = 500,
+  gene.selection = "pairwise",
+  pch = 21
+)
+
+mds_var_explained <- mds_data$var.explained[1:2]
+```
+The MDS plot uses the logFC as the distance measure to do a Principal
+Coordinate Analysis.
+
+
+```{r plot-mds}
+mds_data_df <- colData(exploration_counts_SE) %>%
+  as.data.frame() %>%
+  mutate(mds_x = mds_data$x * -1, mds_y = mds_data$y)
+
+pcoa_data <- perform_mds(normalized_logcpm, method = "PCoA")
+
+(pcoa_plot <- make_mds_plot(pcoa_data,
+  axis_labels = "leading logFC dim",
+  coord_fixed = FALSE
+))
+
+saveplot(pcoa_plot)
+```
+
+
+# Session Info
+
+```{r session-info}
+save(
+  n_genes_exploration, percent_variance, library_sizes_stats,
+  mds_var_explained, strandedness,
+  file = here(str_glue("results/paper/{prefix}.RData"))
+)
+
+save.image(here("results/R/03_data-exploration/environment.RData"))
+
+session_info()
+```

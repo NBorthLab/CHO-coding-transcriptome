@@ -1,0 +1,7 @@
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - gffread=0.12.7
+platforms:
+  - linux-64

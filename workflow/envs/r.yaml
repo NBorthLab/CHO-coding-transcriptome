@@ -1,0 +1,52 @@
+name: P02-r
+channels:
+  - conda-forge
+  - bioconda
+  - mriedl93
+  - defaults
+dependencies:
+  - r-essentials=4.3
+  - r-here
+  - r-tidyverse
+  - r-ggplot2=3.5.1
+  - bioconductor-tximport
+  - bioconductor-annotationdbi
+  - bioconductor-deseq2
+  - r-rcolorbrewer
+  - r-ggh4x
+  - r-ggpubr
+  - r-gt
+  - r-gtextras
+  - r-extrafont
+  - r-cairo
+  - r-svglite
+  - r-fontawesome
+  - bioconductor-complexheatmap
+  - r-complexupset
+  - r-seriation
+  - bioconductor-genomicfeatures
+  - bioconductor-edger
+  - quarto
+  - r-matrix=1.6_3 # 1.6_4 error with PVCA
+  - bioconductor-pvca
+  - r-diptest
+  - r-logger
+  - r-ggridges
+  - r-ggforce
+  - r-gghalves
+  - r-latex2exp
+  - r-gggrid
+  - r-concaveman
+  - r-plotly
+  - r-venndiagram
+  - r-venneuler
+  - r-eulerr
+  - r-rnaseqqc
+  - bioconductor-annotationhub
+  - bioconductor-ensembldb
+  - bioconductor-orthogene
+  - bioconductor-clusterprofiler
+  - bioconductor-pathview
+  - bioconductor-org.mm.eg.db
+  - bioconductor-pcatools
+  - bioconductor-go.db
